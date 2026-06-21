@@ -1,31 +1,30 @@
 # Dimac
 
-Dimac is a macOS menu bar app that dims displays after inactivity and restores the previous brightness as soon as input is detected.
+Dimac is a macOS menu bar app for Apple Silicon MacBooks that lowers internal and external display brightness after inactivity, helping reduce how long static images stay at full intensity and lowering burn-in or ghosting risk. When activity resumes, it restores the previous brightness.
 
 ## Screenshots
 
 <p align="center">
-  <img src=".github/assets/dimac-overview.png" alt="Dimac compact popover" width="384" />
   <img src=".github/assets/dimac-advanced.png" alt="Dimac advanced settings and per-display controls" width="386" />
 </p>
 
 ## What It Does
 
-- Dims built-in and external displays after an idle timeout.
-- Restores brightness when mouse, keyboard, or scroll activity resumes.
-- Stores per-display brightness preferences for external and hardware-controlled displays.
-- Runs as a menu bar extra without a Dock icon.
+- Dims built-in and external displays after an idle timeout to reduce the impact of long unchanged images.
+- Restores previous brightness when mouse, keyboard, or scroll activity resumes.
+- Stores per-display brightness preferences and runs as a menu bar app without a Dock icon.
 
 ## Requirements
 
-- macOS 13 or newer
-- Apple Silicon Mac (M-series)
+- Tested on Apple Silicon MacBooks (M-series) running macOS 13 or newer
 - `m1ddc` for DDC-capable external displays
-- `brightness` for built-in display control, hardware discovery, and CLI fallback paths
+- `brightness` for built-in display control and hardware discovery
 
-Dimac does not bundle, build, or vendor either helper tool. It looks for executable binaries on disk and runs them by path.
+Dimac does not bundle either helper. It looks for executables on disk and lets you override both paths in `Advanced` settings.
 
-Recommended helper setup:
+## Quick Start
+
+1. Install the helper tools:
 
 ```sh
 brew install m1ddc
@@ -36,83 +35,21 @@ make
 sudo make install
 ```
 
-Dimac auto-detects helpers in common Homebrew locations, including `/opt/homebrew/bin` and `/usr/local/bin`. You can override both paths in `Advanced` settings.
-
-`brightness` source-build instructions come from the upstream [`nriley/brightness`](https://github.com/nriley/brightness) project. If you prefer to build `m1ddc` from source too, that also works. Build it separately and point Dimac at the resulting binaries in `Advanced` settings.
-
-See [INSTALL.md](INSTALL.md) for the recommended install paths and a dependency breakdown.
-
-## Install
-
-For most users, the shortest path is:
-
-1. Install `m1ddc` with Homebrew and build `brightness` from source.
-2. Build the app bundle with `zsh ./scripts/build-app.sh`.
-3. Open `.build/release/Dimac.app`.
-
-See [INSTALL.md](INSTALL.md) for the full source-build and helper-tool notes.
-
-## Build
-
-Build the Swift package:
-
-```sh
-swift build
-```
-
-Create an app bundle:
+2. Build the app:
 
 ```sh
 zsh ./scripts/build-app.sh
 ```
 
-The app bundle is created at:
+3. Open `.build/release/Dimac.app`.
 
-```text
-.build/release/Dimac.app
-```
+See [INSTALL.md](INSTALL.md) for full install notes and helper details.
 
-## Test
+## Notes
 
-Run the unit tests with:
-
-```sh
-zsh ./scripts/test.sh
-```
-
-If the script reports a Command Line Tools-only setup, switch to the full Xcode toolchain first:
-
-```sh
-sudo xcode-select -switch /Applications/Xcode.app/Contents/Developer
-```
-
-## Project Layout
-
-- `Sources/Dimac`: app shell, menu bar UI, permissions, and settings
-- `Sources/DimacCore`: dimming logic, brightness controllers, and persistence helpers
-- `Tests/DimacCoreTests`: unit tests for core behavior
-- `Tests/DimacTests`: app-layer tests for settings and integration behavior
-- `scripts/build-app.sh`: app bundle packaging script
-
-## Permissions And Privacy
-
-Input Monitoring is optional. If it is already granted, Dimac can restore brightness a bit faster through an event-tap wake path. Without it, the app still restores normally through its idle polling path.
-
-Dimac does not log keystrokes or send activity data anywhere.
-
-The app stores:
-
-- preferences in `UserDefaults`
-- the active brightness snapshot in `~/Library/Application Support/Dimac/active-snapshot.json`
-
-See [PRIVACY.md](PRIVACY.md) for the full data-handling note.
-
-## Limitations
-
-- Intel Macs are unsupported for now.
-- Built-in display brightness uses Apple's private `DisplayServices.framework`, loaded dynamically at runtime. That is acceptable for local use but is not App Store-friendly.
-- External display brightness depends on DDC support and `m1ddc`.
-- Built-in dim/restore, hardware discovery, and some fallback control paths depend on the `brightness` CLI in the current implementation.
+- Input Monitoring is optional. If already granted, brightness can restore a bit faster.
+- Dimac does not send activity data anywhere.
+- Full privacy details are in [PRIVACY.md](PRIVACY.md).
 
 ## Contributing
 
