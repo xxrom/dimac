@@ -27,10 +27,15 @@ If you launch Dimac without these helpers installed, the app may still open, but
 
 ## Recommended Install Path
 
-The easiest path is to install both helpers with Homebrew:
+Recommended setup:
 
 ```sh
-brew install m1ddc brightness
+brew install m1ddc
+
+git clone https://github.com/nriley/brightness.git
+cd brightness
+make
+sudo make install
 ```
 
 Then build Dimac:
@@ -49,9 +54,9 @@ Open the app bundle:
 
 That is supported too, but you must do it outside Dimac.
 
-1. Build `brightness` yourself.
-2. Build `m1ddc` yourself.
-3. Open Dimac and set the binary paths in `Advanced` settings.
+1. Build `brightness` from the upstream [`nriley/brightness`](https://github.com/nriley/brightness) repository.
+2. Build `m1ddc` yourself if you do not want the Homebrew package.
+3. Open Dimac and set the binary paths in `Advanced` settings if they are not auto-detected.
 
 Dimac only needs executable paths. It does not care whether those binaries came from Homebrew or from your own source builds.
 

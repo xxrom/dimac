@@ -25,15 +25,20 @@ Dimac is a macOS menu bar app that dims displays after inactivity and restores t
 
 Dimac does not bundle, build, or vendor either helper tool. It looks for executable binaries on disk and runs them by path.
 
-The easiest install path is Homebrew:
+Recommended helper setup:
 
 ```sh
-brew install m1ddc brightness
+brew install m1ddc
+
+git clone https://github.com/nriley/brightness.git
+cd brightness
+make
+sudo make install
 ```
 
 Dimac auto-detects helpers in common Homebrew locations, including `/opt/homebrew/bin` and `/usr/local/bin`. You can override both paths in `Advanced` settings.
 
-If you prefer to build `m1ddc` or `brightness` from source yourself, that also works. Build them separately and point Dimac at the resulting binaries in `Advanced` settings.
+`brightness` source-build instructions come from the upstream [`nriley/brightness`](https://github.com/nriley/brightness) project. If you prefer to build `m1ddc` from source too, that also works. Build it separately and point Dimac at the resulting binaries in `Advanced` settings.
 
 See [INSTALL.md](INSTALL.md) for the recommended install paths and a dependency breakdown.
 
@@ -41,7 +46,7 @@ See [INSTALL.md](INSTALL.md) for the recommended install paths and a dependency 
 
 For most users, the shortest path is:
 
-1. Install the helper tools with Homebrew.
+1. Install `m1ddc` with Homebrew and build `brightness` from source.
 2. Build the app bundle with `zsh ./scripts/build-app.sh`.
 3. Open `.build/release/Dimac.app`.
 

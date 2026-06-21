@@ -7,7 +7,12 @@
 3. Install the helper CLIs:
 
 ```sh
-brew install m1ddc brightness
+brew install m1ddc
+
+git clone https://github.com/nriley/brightness.git
+cd brightness
+make
+sudo make install
 ```
 
 4. Build the package:
