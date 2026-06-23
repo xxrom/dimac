@@ -43,7 +43,6 @@ final class AppModel: ObservableObject {
         )
 
         AppRuntime.model = self
-        observeSettings()
         setUp()
     }
 
@@ -52,7 +51,7 @@ final class AppModel: ObservableObject {
         loginItemStatus = LoginItemController.statusDescription
         settings.launchAtLogin = LoginItemController.isEnabled
 
-        applyMenuBarIconVisibility()
+        statusItemController.setVisible(!settings.hideMenuBarIcon)
         startIdleTimer()
         startInputWakeMonitor()
         observeSystemNotifications()
@@ -172,6 +171,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setHideMenuBarIcon(_ hidden: Bool) {
+        settings.hideMenuBarIcon = hidden
+
+        if hidden {
+            showSettingsWindow()
+        }
+
+        statusItemController.setVisible(!hidden)
+    }
+
     func showSettingsWindow() {
         settingsWindowController.show()
     }
@@ -182,19 +191,6 @@ final class AppModel: ObservableObject {
         } else {
             statusItemController.showPopover()
         }
-    }
-
-    private func observeSettings() {
-        settings.$hideMenuBarIcon
-            .dropFirst()
-            .sink { [weak self] _ in
-                self?.applyMenuBarIconVisibility()
-            }
-            .store(in: &cancellables)
-    }
-
-    private func applyMenuBarIconVisibility() {
-        statusItemController.setVisible(!settings.hideMenuBarIcon)
     }
 
     private func startIdleTimer() {

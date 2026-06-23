@@ -21,7 +21,7 @@ let package = Package(
         .executableTarget(
             name: "Dimac",
             dependencies: ["DimacCore"],
-            exclude: ["Resources/Info.plist"],
+            exclude: ["Resources"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),

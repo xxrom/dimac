@@ -178,8 +178,11 @@ struct SettingsView: View {
                 .frame(width: 18)
                 .accessibilityHidden(true)
 
-            Toggle("Hide menu bar icon", isOn: $settings.hideMenuBarIcon)
-                .toggleStyle(.switch)
+            Toggle("Hide menu bar icon", isOn: Binding(
+                get: { settings.hideMenuBarIcon },
+                set: { model.setHideMenuBarIcon($0) }
+            ))
+            .toggleStyle(.switch)
 
             Spacer(minLength: 12)
         }

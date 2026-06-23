@@ -6,6 +6,7 @@ final class StatusItemController: NSObject {
     private weak var model: AppModel?
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var outsideEventMonitor: Any?
 
     init(model: AppModel) {
         self.model = model
@@ -35,6 +36,7 @@ final class StatusItemController: NSObject {
         let popover = makePopover()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         self.popover = popover
+        startMonitoringOutsideEvents()
     }
 
     private func installIfNeeded() {
@@ -61,8 +63,7 @@ final class StatusItemController: NSObject {
     }
 
     private func remove() {
-        popover?.performClose(nil)
-        popover = nil
+        closePopover()
 
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
@@ -72,16 +73,41 @@ final class StatusItemController: NSObject {
 
     @objc private func togglePopover() {
         if let popover, popover.isShown {
-            popover.performClose(nil)
+            closePopover()
             return
         }
 
         showPopover()
     }
 
+    private func closePopover() {
+        stopMonitoringOutsideEvents()
+        popover?.performClose(nil)
+        popover = nil
+    }
+
+    private func startMonitoringOutsideEvents() {
+        stopMonitoringOutsideEvents()
+        outsideEventMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.closePopover()
+            }
+        }
+    }
+
+    private func stopMonitoringOutsideEvents() {
+        if let outsideEventMonitor {
+            NSEvent.removeMonitor(outsideEventMonitor)
+        }
+        outsideEventMonitor = nil
+    }
+
     private func makePopover() -> NSPopover {
         let popover = NSPopover()
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentSize = NSSize(width: 330, height: 520)
 
         if let model {
@@ -94,5 +120,12 @@ final class StatusItemController: NSObject {
         }
 
         return popover
+    }
+}
+
+extension StatusItemController: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        stopMonitoringOutsideEvents()
+        popover = nil
     }
 }
