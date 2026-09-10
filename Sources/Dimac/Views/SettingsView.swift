@@ -26,6 +26,12 @@ struct SettingsView: View {
 
             Divider()
 
+            displayControls
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+
+            Divider()
+
             advanced
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -103,7 +109,7 @@ struct SettingsView: View {
 
     private var dimLevelRow: some View {
         VStack(spacing: 7) {
-            settingRow("Dim level", systemImage: "sun.min") {
+            settingRow("Dim all displays", systemImage: "sun.min") {
                 Text("\(settings.dimPercent)%")
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -119,11 +125,98 @@ struct SettingsView: View {
             )
             .padding(.leading, 26)
 
-            Text("Restores your previous brightness when you return. Dim levels apply on the next idle cycle and never brighten a screen.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 26)
+            DisclosureGroup("How dimming works") {
+                Text("Restores your previous brightness when you return. Idle levels apply on the next idle cycle and never brighten a screen. Dim all displays replaces individual idle levels. If a monitor cannot report brightness, set Now once per session to enable dimming; monitor-button changes cannot be detected.")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .padding(.leading, 26)
+        }
+    }
+
+    private var displayControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Displays · \(model.displayControlRows.count)")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    model.refreshExternalDisplays()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh displays and brightness")
+            }
+            .font(.system(size: 11))
+
+            if model.displayControlRows.isEmpty {
+                Text("No displays found. Try refreshing.")
+                    .foregroundStyle(.secondary)
+            } else if model.displayControlRows.count <= 3 {
+                displayList
+            } else {
+                ScrollView { displayList }
+                    .frame(height: 240)
+            }
+            if let error = dimmer.lastError {
+                errorRow(error)
+            }
+        }
+    }
+
+    private var displayList: some View {
+        VStack(spacing: 12) {
+            ForEach(model.displayControlRows) { row in
+                compactDisplayRow(row)
+            }
+        }
+    }
+
+    private func compactDisplayRow(_ row: DisplayControlRow) -> some View {
+        VStack(spacing: 5) {
+            HStack(spacing: 6) {
+                Text(row.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(!row.isControllable ? "Unavailable" : row.currentPercent != nil ? row.controlDescription : row.requestedPercent != nil ? "Set level" : "Set first")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .help("\(row.name) · \(row.resolution) · \(row.controlDescription)")
+
+            CurrentBrightnessSlider(
+                percent: row.currentPercent,
+                requestedPercent: row.requestedPercent,
+                isControllable: row.isControllable
+            ) {
+                model.setCurrentBrightness($0, for: row.id)
+                let updated = model.displayControlRows.first(where: { $0.id == row.id })
+                return updated?.currentPercent ?? updated?.requestedPercent
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(row.name) current brightness")
+
+            HStack(spacing: 7) {
+                Text("Idle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, alignment: .leading)
+                Slider(value: Binding(
+                    get: { Double(row.dimPercent) },
+                    set: { model.setDisplayDimPercent(Int($0.rounded()), for: row.id) }
+                ), in: 1...100)
+                .accessibilityLabel("\(row.name) idle brightness")
+                Text("\(row.dimPercent)%")
+                    .monospacedDigit()
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 58, alignment: .trailing)
+            }
+            .disabled(!row.isControllable)
         }
     }
 
@@ -227,14 +320,6 @@ struct SettingsView: View {
                         tint: .secondary
                     )
 
-                    statusRow(
-                        title: "External",
-                        value: model.externalDisplaySummary,
-                        systemImage: "display",
-                        tint: model.connectedExternalDisplayRows.isEmpty ? .secondary : .green
-                    )
-
-                    displayControls
                     launchAtLoginRow
                     hideMenuBarIconRow
                     toolPathRow(
@@ -255,119 +340,10 @@ struct SettingsView: View {
                         warningRow("Old idle-dim LaunchAgent detected")
                     }
 
-                    if let error = dimmer.lastError {
-                        errorRow(error)
-                    }
                 }
                 .padding(.top, 10)
             }
         }
-    }
-
-    private var displayControls: some View {
-        VStack(spacing: 7) {
-            settingRow("Displays", systemImage: "sun.max") {
-                Button {
-                    model.refreshExternalDisplays()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh displays")
-            }
-
-            if !model.displayControlRows.isEmpty {
-                VStack(spacing: 10) {
-                    ForEach(model.displayControlRows) { row in
-                        displayControlRow(row)
-                    }
-                }
-                .padding(.leading, 26)
-            }
-        }
-    }
-
-    private func displayControlRow(_ row: DisplayControlRow) -> some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(row.name)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(1)
-
-                    HStack(spacing: 5) {
-                        if !row.resolution.isEmpty {
-                            Text(row.resolution)
-                        }
-
-                        Text(row.controlDescription)
-                    }
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                }
-
-                Spacer(minLength: 8)
-
-                Text(row.isExternal ? "External" : "Built-in")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            CurrentBrightnessSlider(
-                percent: row.currentPercent,
-                requestedPercent: row.requestedPercent,
-                isControllable: row.isControllable
-            ) {
-                model.setCurrentBrightness($0, for: row.id)
-                let updated = model.displayControlRows.first(where: { $0.id == row.id })
-                return updated?.currentPercent ?? updated?.requestedPercent
-            }
-
-            if row.isControllable, row.currentPercent == nil {
-                Text("Reading unavailable. Set brightness here to enable idle dimming for this session. Monitor-button changes cannot be detected.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            sliderRow(title: "Dim", value: row.dimPercent) {
-                Slider(
-                    value: Binding(
-                        get: { Double(row.dimPercent) },
-                        set: { model.setDisplayDimPercent(Int($0.rounded()), for: row.id) }
-                    ),
-                    in: 1...100
-                )
-            }
-            .disabled(!row.isControllable)
-        }
-    }
-
-    private func sliderRow<Track: View>(
-        title: String,
-        value: Int,
-        @ViewBuilder track: () -> Track
-    ) -> some View {
-        HStack(spacing: 7) {
-            Text(title)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .frame(width: 38, alignment: .leading)
-
-            track()
-
-            Text("\(value)%")
-                .font(.system(size: 11))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 40, alignment: .trailing)
-        }
-    }
-
-    private var systemAccentColor: Color {
-        Color(nsColor: .controlAccentColor)
     }
 
     private func toolPathRow(
@@ -539,7 +515,7 @@ private struct CurrentBrightnessSlider: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 58, alignment: .trailing)
         }
-        .help("Adjust screen brightness now. Dim controls the next idle cycle.")
+        .help("Adjust screen brightness now. Idle controls the next idle cycle.")
         .onAppear { draft = Double(percent ?? requestedPercent ?? 0) }
         .onChange(of: percent) { value in
             if !isEditing { draft = Double(value ?? requestedPercent ?? 0) }

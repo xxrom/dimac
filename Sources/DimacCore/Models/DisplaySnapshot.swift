@@ -14,7 +14,7 @@ public struct BrightnessSnapshot: Codable, Equatable, Sendable {
         appliedInternalDisplays: [InternalDisplaySnapshot]? = nil,
         appliedExternalDisplays: [ExternalDisplaySnapshot]? = nil,
         createdAt: Date = Date(),
-        appVersion: String = "0.1.0"
+        appVersion: String = "0.1.1"
     ) {
         self.internalDisplays = internalDisplays
         self.externalDisplays = externalDisplays
