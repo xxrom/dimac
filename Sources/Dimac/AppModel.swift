@@ -18,17 +18,15 @@ final class AppModel: ObservableObject {
     private let idleReader = IOKitIdleTimeReader()
     private let externalBrightness: ExternalBrightnessManaging
     private let displayDiscovery: ConnectedDisplayDiscovery
-    private let hardwareBrightness: DisplayHardwareBrightnessController
     lazy var dimmer: DimmerController = makeDimmer()
     private lazy var statusItemController = StatusItemController(model: self)
     private lazy var settingsWindowController = SettingsWindowController(model: self)
     private var inputWakeMonitor: InputWakeMonitor?
     private var idleTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
-    private var displayControlApplyTimer: Timer?
 
-    init() {
-        let settings = SettingsStore()
+    init(settings: SettingsStore? = nil, dimmer: DimmerController? = nil, startAutomatically: Bool = true) {
+        let settings = settings ?? SettingsStore()
         self.settings = settings
 
         let externalController = M1DDCBrightnessController(
@@ -38,12 +36,14 @@ final class AppModel: ObservableObject {
         self.displayDiscovery = ConnectedDisplayDiscovery(
             brightnessPathProvider: { settings.brightnessPath }
         )
-        self.hardwareBrightness = DisplayHardwareBrightnessController(
-            brightnessPathProvider: { settings.brightnessPath }
-        )
 
-        AppRuntime.model = self
-        setUp()
+        if let dimmer {
+            self.dimmer = dimmer
+        }
+        if startAutomatically {
+            AppRuntime.model = self
+            setUp()
+        }
     }
 
     private func setUp() {
@@ -56,31 +56,28 @@ final class AppModel: ObservableObject {
         startInputWakeMonitor()
         observeSystemNotifications()
 
-        refreshExternalDisplays()
         dimmer.restorePersistedSnapshotIfNeeded()
         refreshExternalDisplays()
     }
 
     func dimNow() {
-        dimmer.dimNow(applyHardware: false)
-        applyDisplayControls(forDimmedState: true)
+        dimmer.dimNow()
     }
 
     func restoreNow() {
-        dimmer.restoreNow(reason: "manual", applyHardware: false)
-        applyDisplayControls(forDimmedState: false)
+        dimmer.restoreNow(reason: "manual")
     }
 
     func refreshExternalDisplays() {
+        let pendingRestoreStatus = dimmer.isDimmed ? dimmer.statusMessage : nil
+        let pendingRestoreError = dimmer.isDimmed ? dimmer.lastError : nil
         let connectedDisplays = displayDiscovery.displays()
         connectedExternalDisplayRows = connectedDisplays.filter(\.isExternal)
         let ddcDisplays = dimmer.refreshExternalDisplays()
 
         syncDisplayControlRows(
             from: connectedDisplays,
-            ddcDisplays: ddcDisplays,
-            ddcBrightnessByDisplay: loadDDCBrightnessByDisplay(for: ddcDisplays),
-            useLiveValuesForSeeding: !dimmer.isDimmed
+            ddcDisplays: ddcDisplays
         )
         ddcDisplayCount = matchedExternalDDCDisplayCount(in: displayControlRows)
 
@@ -90,8 +87,9 @@ final class AppModel: ObservableObject {
         ) {
             dimmer.setStatus(status)
         }
-
-        applyDisplayControls(forDimmedState: dimmer.isDimmed)
+        if let pendingRestoreError, let pendingRestoreStatus {
+            dimmer.setStatus(pendingRestoreStatus, error: pendingRestoreError)
+        }
     }
 
     var externalDisplaySummary: String {
@@ -122,40 +120,19 @@ final class AppModel: ObservableObject {
                 key: row.preferenceKey,
                 displayName: row.name
             )
-            displayControlRows[index].normalPercent = preference.normalPercent
             displayControlRows[index].dimPercent = preference.dimPercent
         }
     }
 
-    func setDisplayPercent(_ percent: Int, for rowID: String, kind: DisplayControlValueKind) {
+    func setDisplayDimPercent(_ percent: Int, for rowID: String) {
         guard let rowIndex = displayControlRows.firstIndex(where: { $0.id == rowID }) else {
             return
         }
-
-        var row = displayControlRows[rowIndex]
-        switch kind {
-        case .normal:
-            let preference = settings.setDisplayNormalPercent(
-                percent,
-                key: row.preferenceKey,
-                displayName: row.name
-            )
-            row.normalPercent = preference.normalPercent
-            row.dimPercent = preference.dimPercent
-        case .dim:
-            let preference = settings.setDisplayDimPercent(
-                percent,
-                key: row.preferenceKey,
-                displayName: row.name
-            )
-            row.normalPercent = preference.normalPercent
-            row.dimPercent = preference.dimPercent
-        }
-        displayControlRows[rowIndex] = row
-    }
-
-    func applyDisplayControlsForCurrentState() {
-        scheduleDisplayControlApply(delay: 0.05)
+        let row = displayControlRows[rowIndex]
+        let preference = settings.setDisplayDimPercent(
+            percent, key: row.preferenceKey, displayName: row.name
+        )
+        displayControlRows[rowIndex].dimPercent = preference.dimPercent
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
@@ -201,9 +178,7 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 let idleTime = self.idleReader.idleTime()
                 self.idleTimeText = Self.formatIdleTime(idleTime)
-                let wasDimmed = self.dimmer.isDimmed
-                self.dimmer.handleIdleTime(idleTime, applyHardware: false)
-                self.handleDimStateTransition(from: wasDimmed)
+                self.dimmer.handleIdleTime(idleTime)
             }
         }
 
@@ -221,9 +196,7 @@ final class AppModel: ObservableObject {
         let monitor = InputWakeMonitor { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                let wasDimmed = self.dimmer.isDimmed
-                self.dimmer.handleUserActivity(applyHardware: false)
-                self.handleDimStateTransition(from: wasDimmed)
+                self.dimmer.handleUserActivity()
             }
         }
 
@@ -256,35 +229,22 @@ final class AppModel: ObservableObject {
 
     private func syncDisplayControlRows(
         from displays: [ConnectedDisplayRow],
-        ddcDisplays: [ExternalDisplayReference],
-        ddcBrightnessByDisplay: [String: Int],
-        useLiveValuesForSeeding: Bool
+        ddcDisplays: [ExternalDisplayReference]
     ) {
         let ddcContext = makeDDCMatchContext(for: displays, ddcDisplays: ddcDisplays)
-        var externalOffset = 0
 
         displayControlRows = displays.map { display in
             let mode = resolveDisplayControlMode(
                 for: display,
-                context: ddcContext,
-                externalOffset: externalOffset
+                context: ddcContext
             )
             let preferenceKey = "display:\(display.id)"
             let preference = settings.seedDisplayControl(
                 key: preferenceKey,
                 displayName: display.name,
-                currentPercent: liveBrightnessPercent(
-                    for: display,
-                    mode: mode,
-                    ddcBrightnessByDisplay: ddcBrightnessByDisplay,
-                    useLiveValuesForSeeding: useLiveValuesForSeeding
-                ),
+                currentPercent: nil,
                 defaultDimPercent: settings.dimPercent
             )
-
-            if display.isExternal {
-                externalOffset += 1
-            }
 
             return DisplayControlRow(
                 id: preferenceKey,
@@ -292,35 +252,9 @@ final class AppModel: ObservableObject {
                 name: display.name,
                 resolution: display.resolution,
                 isExternal: display.isExternal,
-                normalPercent: preference.normalPercent,
                 dimPercent: preference.dimPercent,
                 mode: mode
             )
-        }
-    }
-
-    private var externalBrightnessRestoreDefaults: [String: Int] {
-        displayControlRows.reduce(into: [:]) { defaults, row in
-            guard case .ddc(let display) = row.mode else {
-                return
-            }
-
-            defaults[display.brightnessPreferenceKey] = row.normalPercent
-        }
-    }
-
-    private func loadDDCBrightnessByDisplay(for displays: [ExternalDisplayReference]) -> [String: Int] {
-        guard !displays.isEmpty else {
-            return [:]
-        }
-
-        do {
-            let snapshots = try externalBrightness.currentSnapshot(for: displays)
-            return Dictionary(
-                uniqueKeysWithValues: snapshots.map { ($0.display.brightnessPreferenceKey, $0.luminance) }
-            )
-        } catch {
-            return [:]
         }
     }
 
@@ -346,28 +280,22 @@ final class AppModel: ObservableObject {
             displaysByName: Dictionary(
                 grouping: ddcDisplays.filter { !$0.isPlaceholderDisplayName },
                 by: { Self.normalizedDisplayName($0.name) }
-            ).mapValues { $0[0] },
-            unnamedDisplays: ddcDisplays.filter(\.isPlaceholderDisplayName),
-            externalDisplayCount: displays.filter(\.isExternal).count
+            ).compactMapValues { matches in
+                guard matches.count == 1,
+                      displays.filter({ $0.isExternal && Self.normalizedDisplayName($0.name) == Self.normalizedDisplayName(matches[0].name) }).count == 1 else {
+                    return nil
+                }
+                return matches[0]
+            }
         )
     }
 
     private func resolveDisplayControlMode(
         for display: ConnectedDisplayRow,
-        context: DDCMatchContext,
-        externalOffset: Int
+        context: DDCMatchContext
     ) -> DisplayControlMode {
         if display.isExternal,
            let ddcDisplay = context.displaysByName[Self.normalizedDisplayName(display.name)] {
-            return .ddc(ddcDisplay)
-        }
-
-        if display.isExternal, context.unnamedDisplays.count == context.externalDisplayCount,
-           let ddcDisplay = context.unnamedDisplays[safe: externalOffset] {
-            return .ddc(ddcDisplay)
-        }
-
-        if display.isExternal, let ddcDisplay = context.unnamedDisplays[safe: externalOffset] {
             return .ddc(ddcDisplay)
         }
 
@@ -380,71 +308,6 @@ final class AppModel: ObservableObject {
         }
 
         return .unsupported
-    }
-
-    private func liveBrightnessPercent(
-        for display: ConnectedDisplayRow,
-        mode: DisplayControlMode,
-        ddcBrightnessByDisplay: [String: Int],
-        useLiveValuesForSeeding: Bool
-    ) -> Int? {
-        guard useLiveValuesForSeeding else {
-            return nil
-        }
-
-        switch mode {
-        case .ddc(let ddcDisplay):
-            return ddcBrightnessByDisplay[ddcDisplay.brightnessPreferenceKey]
-        case .brightnessCLI, .unsupported:
-            return display.brightnessPercent
-        }
-    }
-
-    private func applyDisplayControls(forDimmedState isDimmed: Bool) {
-        displayControlApplyTimer?.invalidate()
-        displayControlApplyTimer = nil
-        applyDisplayControls(percent: isDimmed ? \.dimPercent : \.normalPercent)
-    }
-
-    private func handleDimStateTransition(from wasDimmed: Bool) {
-        guard wasDimmed != dimmer.isDimmed else {
-            return
-        }
-
-        applyDisplayControls(forDimmedState: dimmer.isDimmed)
-    }
-
-    private func scheduleDisplayControlApply(delay: TimeInterval = 0.15) {
-        displayControlApplyTimer?.invalidate()
-        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.applyDisplayControls(forDimmedState: self.dimmer.isDimmed)
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        displayControlApplyTimer = timer
-    }
-
-    private func applyDisplayControls(percent percentKeyPath: KeyPath<DisplayControlRow, Int>) {
-        for row in displayControlRows {
-            applyHardwareDisplayControl(row, percent: row[keyPath: percentKeyPath])
-        }
-    }
-
-    private func applyHardwareDisplayControl(_ row: DisplayControlRow, percent: Int) {
-        do {
-            switch row.mode {
-            case .brightnessCLI(let displayIndex):
-                try hardwareBrightness.setBrightness(percent: percent, displayIndex: displayIndex)
-            case .ddc(let display):
-                try externalBrightness.setBrightness(percent: percent, for: [display])
-            case .unsupported:
-                return
-            }
-        } catch {
-            dimmer.setStatus("Display brightness failed", error: error.localizedDescription)
-        }
     }
 
     private static func formatIdleTime(_ idleTime: TimeInterval) -> String {
@@ -493,9 +356,23 @@ final class AppModel: ObservableObject {
     private func makeDimmer() -> DimmerController {
         DimmerController(
             settingsProvider: { [unowned self] in
-                self.settings.currentSettings(
-                    externalBrightnessByDisplay: self.externalBrightnessRestoreDefaults
-                )
+                var result = self.settings.currentSettings(externalBrightnessByDisplay: [:])
+                for row in self.displayControlRows {
+                    switch row.mode {
+                    case .ddc(let display):
+                        result.externalDimPercentByDisplay[display.brightnessPreferenceKey] = row.dimPercent
+                        if let displayID = UInt32(row.preferenceKey.replacingOccurrences(of: "display:", with: "")) {
+                            result.excludedInternalDisplayIDs.insert(displayID)
+                        }
+                    case .brightnessCLI:
+                        if let displayID = UInt32(row.preferenceKey.replacingOccurrences(of: "display:", with: "")) {
+                            result.internalDimPercentByDisplay[displayID] = row.dimPercent
+                        }
+                    case .unsupported:
+                        break
+                    }
+                }
+                return result
             },
             internalBrightness: makeInternalBrightnessController(),
             externalBrightness: externalBrightness,
@@ -539,18 +416,12 @@ enum DisplayControlMode: Equatable {
     case unsupported
 }
 
-enum DisplayControlValueKind {
-    case normal
-    case dim
-}
-
 struct DisplayControlRow: Identifiable, Equatable {
     let id: String
     let preferenceKey: String
     let name: String
     let resolution: String
     let isExternal: Bool
-    var normalPercent: Int
     var dimPercent: Int
     let mode: DisplayControlMode
 
@@ -570,16 +441,8 @@ struct DisplayControlRow: Identifiable, Equatable {
     }
 }
 
-private extension Array {
-    subscript(safe index: Index) -> Element? {
-        indices.contains(index) ? self[index] : nil
-    }
-}
-
 private struct DDCMatchContext {
     let displaysByName: [String: ExternalDisplayReference]
-    let unnamedDisplays: [ExternalDisplayReference]
-    let externalDisplayCount: Int
 }
 
 private extension ExternalDisplayReference {

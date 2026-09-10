@@ -144,7 +144,7 @@ public final class M1DDCBrightnessController: ExternalBrightnessManaging {
             }
         }
 
-        if errors.count == displays.count, let firstError = errors.first {
+        if let firstError = errors.first {
             throw firstError
         }
     }
@@ -160,7 +160,7 @@ public final class M1DDCBrightnessController: ExternalBrightnessManaging {
             }
         }
 
-        if errors.count == snapshots.count, let firstError = errors.first {
+        if let firstError = errors.first {
             throw firstError
         }
     }

@@ -111,14 +111,15 @@ struct SettingsView: View {
                     get: { Double(settings.dimPercent) },
                     set: { model.setDimPercent(Int($0.rounded())) }
                 ),
-                in: 1...100,
-                onEditingChanged: { editing in
-                    if !editing {
-                        model.applyDisplayControlsForCurrentState()
-                    }
-                }
+                in: 1...100
             )
             .padding(.leading, 26)
+
+            Text("Restores your previous brightness when you return. Dim levels apply on the next idle cycle and never brighten a screen.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 26)
         }
     }
 
@@ -310,64 +311,16 @@ struct SettingsView: View {
                     .lineLimit(1)
             }
 
-            displaySlider(
-                title: "Bright",
-                value: row.normalPercent,
-                setValue: { model.setDisplayPercent($0, for: row.id, kind: .normal) }
-            )
-            .disabled(!row.isControllable)
-
-            cappedDisplaySlider(
-                title: "Dim",
-                value: row.dimPercent,
-                allowedUpperBound: row.normalPercent,
-                setValue: { model.setDisplayPercent($0, for: row.id, kind: .dim) }
-            )
-            .disabled(!row.isControllable)
-        }
-    }
-
-    private func displaySlider(
-        title: String,
-        value: Int,
-        setValue: @escaping (Int) -> Void
-    ) -> some View {
-        sliderRow(title: title, value: value) {
-            Slider(
-                value: Binding(
-                    get: { Double(value) },
-                    set: { setValue(Int($0.rounded())) }
-                ),
-                in: 1...100,
-                onEditingChanged: { editing in
-                    if !editing {
-                        model.applyDisplayControlsForCurrentState()
-                    }
-                }
-            )
-            .tint(systemAccentColor)
-        }
-    }
-
-    private func cappedDisplaySlider(
-        title: String,
-        value: Int,
-        allowedUpperBound: Int,
-        setValue: @escaping (Int) -> Void
-    ) -> some View {
-        sliderRow(title: title, value: value) {
-            CappedDisplaySlider(
-                value: Binding(
-                    get: { value },
-                    set: { setValue($0) }
-                ),
-                allowedUpperBound: allowedUpperBound,
-                accentColor: systemAccentColor
-            ) { editing in
-                if !editing {
-                    model.applyDisplayControlsForCurrentState()
-                }
+            sliderRow(title: "Dim", value: row.dimPercent) {
+                Slider(
+                    value: Binding(
+                        get: { Double(row.dimPercent) },
+                        set: { model.setDisplayDimPercent(Int($0.rounded()), for: row.id) }
+                    ),
+                    in: 1...100
+                )
             }
+            .disabled(!row.isControllable)
         }
     }
 
@@ -534,113 +487,5 @@ struct SettingsView: View {
             .lineLimit(3)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct CappedDisplaySlider: View {
-    @Binding var value: Int
-
-    let allowedUpperBound: Int
-    let accentColor: Color
-    let onEditingChanged: (Bool) -> Void
-
-    @Environment(\.isEnabled) private var isEnabled
-    @State private var isDragging = false
-
-    private let minimumValue = 1
-    private let maximumValue = 100
-    private let trackHeight: CGFloat = 6
-    private let thumbSize: CGFloat = 14
-
-    var body: some View {
-        GeometryReader { geometry in
-            let allowedValue = max(minimumValue, min(allowedUpperBound, maximumValue))
-            let currentValue = max(minimumValue, min(value, allowedValue))
-            let allowedProgress = progress(for: allowedValue)
-            let currentProgress = progress(for: currentValue)
-            let width = max(geometry.size.width, 1)
-            let allowedWidth = width * allowedProgress
-            let currentWidth = width * currentProgress
-
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.secondary.opacity(0.12))
-                    .frame(height: trackHeight)
-
-                Capsule()
-                    .fill(accentColor.opacity(0.26))
-                    .frame(width: allowedWidth, height: trackHeight)
-
-                Capsule()
-                    .fill(accentColor)
-                    .frame(width: currentWidth, height: trackHeight)
-
-                if allowedValue < maximumValue {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(width: max(0, width - allowedWidth), height: trackHeight)
-                        .offset(x: allowedWidth)
-
-                    RoundedRectangle(cornerRadius: 1, style: .continuous)
-                        .fill(Color.secondary.opacity(0.45))
-                        .frame(width: 2, height: thumbSize - 2)
-                        .offset(x: max(0, min(width - 2, allowedWidth - 1)))
-                }
-
-                Circle()
-                    .fill(accentColor)
-                    .overlay(
-                        Circle()
-                            .stroke(Color.white.opacity(0.35), lineWidth: 0.6)
-                    )
-                    .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
-                    .frame(width: thumbSize, height: thumbSize)
-                    .offset(x: max(0, min(width - thumbSize, currentWidth - (thumbSize / 2))))
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { gesture in
-                        guard isEnabled else {
-                            return
-                        }
-
-                        if !isDragging {
-                            isDragging = true
-                            onEditingChanged(true)
-                        }
-
-                        updateValue(for: gesture.location.x, width: width, allowedUpperBound: allowedValue)
-                    }
-                    .onEnded { gesture in
-                        guard isEnabled else {
-                            return
-                        }
-
-                        updateValue(for: gesture.location.x, width: width, allowedUpperBound: allowedValue)
-                        if isDragging {
-                            isDragging = false
-                            onEditingChanged(false)
-                        }
-                    }
-            )
-        }
-        .frame(height: thumbSize)
-        .opacity(isEnabled ? 1 : 0.55)
-        .help("Dim cannot exceed the current Bright level.")
-        .accessibilityValue("\(value)%")
-    }
-
-    private func updateValue(for locationX: CGFloat, width: CGFloat, allowedUpperBound: Int) {
-        let clampedX = min(max(0, locationX), width)
-        let progress = width > 0 ? clampedX / width : 0
-        let rawValue = Int((Double(progress) * Double(maximumValue - minimumValue)).rounded()) + minimumValue
-        value = min(allowedUpperBound, max(minimumValue, rawValue))
-    }
-
-    private func progress(for value: Int) -> CGFloat {
-        let normalizedValue = max(minimumValue, min(value, maximumValue))
-        return CGFloat(normalizedValue - minimumValue) / CGFloat(maximumValue - minimumValue)
     }
 }

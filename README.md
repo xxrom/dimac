@@ -12,7 +12,11 @@ Dimac is a macOS menu bar app for Apple Silicon MacBooks that lowers internal an
 
 - Dims built-in and external displays after an idle timeout to reduce the impact of long unchanged images.
 - Restores previous brightness when mouse, keyboard, or scroll activity resumes.
-- Stores per-display brightness preferences and runs as a menu bar app without a Dock icon.
+- Stores per-display dim levels and runs as a menu bar app without a Dock icon.
+- Captures actual brightness before each dim cycle; saved settings never define the restore level.
+- Leaves screens that are already darker than the dim target at their current brightness.
+
+Set the timeout and dim level to get started. Advanced settings allow a different dim level for each display. Changes apply on the next idle cycle. The former “Bright” setting is no longer needed; use macOS or your monitor controls to choose your working brightness.
 
 ## Requirements
 

@@ -3,7 +3,24 @@ import XCTest
 
 @MainActor
 final class SettingsStoreTests: XCTestCase {
-    func testLoweringBrightPercentAlsoLowersDimPercent() {
+    func testDisplayDimPercentPersistsAcrossStoreInstances() {
+        let defaults = makeDefaults()
+        let key = "display:external"
+        let store = SettingsStore(defaults: defaults)
+
+        _ = store.seedDisplayControl(
+            key: key,
+            displayName: "MSI PS341WU",
+            currentPercent: 70,
+            defaultDimPercent: 20
+        )
+        let updated = store.setDisplayDimPercent(95, key: key, displayName: "MSI PS341WU")
+
+        XCTAssertEqual(updated.dimPercent, 95)
+        XCTAssertEqual(SettingsStore(defaults: defaults).displayControlPreferences[key]?.dimPercent, 95)
+    }
+
+    func testSeedingExistingDisplayKeepsDimTargetAndIgnoresLiveBrightness() {
         let defaults = makeDefaults()
         let store = SettingsStore(defaults: defaults)
         let key = "display:built-in"
@@ -14,47 +31,23 @@ final class SettingsStoreTests: XCTestCase {
             currentPercent: 80,
             defaultDimPercent: 30
         )
-        _ = store.setDisplayDimPercent(60, key: key, displayName: "Built-in Retina Display")
+        _ = store.setDisplayDimPercent(45, key: key, displayName: "Built-in Retina Display")
 
-        let updated = store.setDisplayNormalPercent(
-            50,
+        let reseeded = store.seedDisplayControl(
             key: key,
-            displayName: "Built-in Retina Display"
+            displayName: "Renamed display",
+            currentPercent: 10,
+            defaultDimPercent: 15
         )
 
-        XCTAssertEqual(updated.normalPercent, 50)
-        XCTAssertEqual(updated.dimPercent, 50)
-        XCTAssertEqual(store.displayControlPreferences[key]?.dimPercent, 50)
+        XCTAssertEqual(reseeded.displayName, "Renamed display")
+        XCTAssertEqual(reseeded.dimPercent, 45)
     }
 
-    func testDimPercentIsClampedToBrightPercent() {
+    func testLegacyBrightPercentDoesNotCapMigratedDimPercent() throws {
         let defaults = makeDefaults()
-        let store = SettingsStore(defaults: defaults)
         let key = "display:external"
-
-        _ = store.seedDisplayControl(
-            key: key,
-            displayName: "MSI PS341WU",
-            currentPercent: 70,
-            defaultDimPercent: 20
-        )
-
-        let updated = store.setDisplayDimPercent(95, key: key, displayName: "MSI PS341WU")
-
-        XCTAssertEqual(updated.normalPercent, 70)
-        XCTAssertEqual(updated.dimPercent, 70)
-    }
-
-    func testInvalidLoadedPreferenceIsNormalized() throws {
-        let suiteName = "dimac.tests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defaults.removePersistentDomain(forName: suiteName)
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
-
-        let key = "display:external"
-        let invalidPreference = DisplayControlPreference(
+        let legacyPreference = LegacyDisplayControlPreference(
             id: key,
             displayName: "MSI PS341WU",
             normalPercent: 40,
@@ -65,14 +58,32 @@ final class SettingsStoreTests: XCTestCase {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         defaults.set(
-            try encoder.encode([key: invalidPreference]),
+            try encoder.encode([key: legacyPreference]),
             forKey: "displayControlPreferences"
         )
 
         let store = SettingsStore(defaults: defaults)
 
-        XCTAssertEqual(store.displayControlPreferences[key]?.normalPercent, 40)
-        XCTAssertEqual(store.displayControlPreferences[key]?.dimPercent, 40)
+        XCTAssertEqual(store.displayControlPreferences[key]?.dimPercent, 90)
+    }
+
+    func testTimeoutAcceptsCompoundValuesAndFormatsWithoutLosingSeconds() {
+        let store = SettingsStore(defaults: makeDefaults())
+
+        store.setTimeoutFromText("1h 30m 5s")
+
+        XCTAssertEqual(store.idleTimeoutSeconds, 5_405)
+        XCTAssertEqual(store.timeoutText, "1h 30m 5s")
+    }
+
+    func testInvalidOrOverflowingTimeoutDoesNotChangeSetting() {
+        let store = SettingsStore(defaults: makeDefaults())
+        store.setIdleTimeoutSeconds(75)
+
+        store.setTimeoutFromText("1hour")
+        XCTAssertEqual(store.idleTimeoutSeconds, 75)
+        store.setTimeoutFromText("999999999999999999999999h")
+        XCTAssertEqual(store.idleTimeoutSeconds, 75)
     }
 
     private func makeDefaults() -> UserDefaults {
@@ -84,4 +95,12 @@ final class SettingsStoreTests: XCTestCase {
         }
         return defaults
     }
+}
+
+private struct LegacyDisplayControlPreference: Codable {
+    let id: String
+    var displayName: String
+    var normalPercent: Int
+    var dimPercent: Int
+    var updatedAt: Date
 }

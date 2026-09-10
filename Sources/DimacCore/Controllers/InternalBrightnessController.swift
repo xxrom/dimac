@@ -9,8 +9,8 @@ public protocol InternalBrightnessManaging {
 }
 
 public final class DisplayServicesBrightnessController: InternalBrightnessManaging {
-    private typealias GetBrightness = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Bool
-    private typealias SetBrightness = @convention(c) (CGDirectDisplayID, Float) -> Bool
+    private typealias GetBrightness = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
+    private typealias SetBrightness = @convention(c) (CGDirectDisplayID, Float) -> Int32
 
     private let getBrightness: GetBrightness
     private let setBrightness: SetBrightness
@@ -41,7 +41,7 @@ public final class DisplayServicesBrightnessController: InternalBrightnessManagi
 
         return displayIDs.compactMap { displayID in
             var value: Float = 0
-            guard getBrightness(displayID, &value) else {
+            guard getBrightness(displayID, &value) == 0 else {
                 return nil
             }
             return InternalDisplaySnapshot(displayID: displayID, brightness: value)
@@ -56,7 +56,7 @@ public final class DisplayServicesBrightnessController: InternalBrightnessManagi
         }
 
         for displayID in displayIDs {
-            guard setBrightness(displayID, value) else {
+            guard setBrightness(displayID, value) == 0 else {
                 throw BrightnessError.writeFailed("built-in display \(displayID)")
             }
         }
@@ -64,7 +64,7 @@ public final class DisplayServicesBrightnessController: InternalBrightnessManagi
 
     public func restore(_ snapshots: [InternalDisplaySnapshot]) throws {
         for snapshot in snapshots {
-            guard setBrightness(CGDirectDisplayID(snapshot.displayID), snapshot.brightness) else {
+            guard setBrightness(CGDirectDisplayID(snapshot.displayID), snapshot.brightness) == 0 else {
                 throw BrightnessError.writeFailed("built-in display \(snapshot.displayID)")
             }
         }
@@ -86,10 +86,13 @@ public final class DisplayServicesBrightnessController: InternalBrightnessManagi
 }
 
 public final class BrightnessCLIBrightnessController: InternalBrightnessManaging {
+    // Kept so snapshots written by older releases can still be decoded. A sentinel
+    // cannot be mapped safely to one display, so restore deliberately ignores it.
     public static let snapshotDisplayID = UInt32.max
 
     private let executablePathProvider: () -> String
     private let commandRunner: CommandRunning
+    private var snapshotDisplayIDs: Set<UInt32> = []
 
     public init(
         executablePathProvider: @escaping () -> String = { CommandLocator.brightnessDefaultPath },
@@ -101,95 +104,166 @@ public final class BrightnessCLIBrightnessController: InternalBrightnessManaging
 
     public func currentSnapshot() throws -> [InternalDisplaySnapshot] {
         let path = executablePathProvider()
-        let result = try commandRunner.run(path, arguments: ["-l"], timeout: 3)
-        guard result.status == 0 else {
-            throw BrightnessError.commandFailed(
-                path: path,
-                arguments: ["-l"],
-                status: result.status,
-                stderr: result.stderr
-            )
+        let displays = try loadDisplayList(path: path)
+        let snapshots = displays.compactMap { display -> InternalDisplaySnapshot? in
+            guard let brightness = display.brightness else {
+                return nil
+            }
+            return InternalDisplaySnapshot(displayID: display.id, brightness: brightness)
+        }
+        guard !snapshots.isEmpty else {
+            throw BrightnessError.invalidOutput(command: "\(path) -lv", output: displays.description)
         }
 
-        guard let brightness = parseBrightness(result.stdout) else {
-            throw BrightnessError.invalidOutput(command: "\(path) -l", output: result.stdout)
-        }
-
-        return [
-            InternalDisplaySnapshot(
-                displayID: Self.snapshotDisplayID,
-                brightness: brightness
-            )
-        ]
+        snapshotDisplayIDs = Set(snapshots.map(\.displayID))
+        return snapshots
     }
 
     public func setBrightness(percent: Int) throws {
         let path = executablePathProvider()
         let value = String(format: "%.4f", Float(DimmerSettings.clampedPercent(percent)) / 100.0)
-        let result = try commandRunner.run(path, arguments: [value], timeout: 3)
-        guard result.status == 0 else {
-            throw BrightnessError.commandFailed(
-                path: path,
-                arguments: [value],
-                status: result.status,
-                stderr: result.stderr
-            )
+        let displays = try loadDisplayList(path: path)
+
+        for display in displays where snapshotDisplayIDs.contains(display.id) {
+            try setBrightness(path: path, displayIndex: display.index, value: value)
         }
     }
 
     public func restore(_ snapshots: [InternalDisplaySnapshot]) throws {
-        guard let brightness = snapshots.first?.brightness else {
+        guard !snapshots.isEmpty else {
             return
         }
 
         let path = executablePathProvider()
-        let value = String(format: "%.4f", min(1.0, max(0.0, brightness)))
-        let result = try commandRunner.run(path, arguments: [value], timeout: 3)
+        let displayIndexesByID = Dictionary(
+            uniqueKeysWithValues: try loadDisplayList(path: path).map { ($0.id, $0.index) }
+        )
+
+        var firstError: Error?
+        for snapshot in snapshots {
+            guard snapshot.displayID != Self.snapshotDisplayID,
+                  let displayIndex = displayIndexesByID[snapshot.displayID] else {
+                firstError = firstError ?? BrightnessError.readFailed("saved display \(snapshot.displayID)")
+                continue
+            }
+
+            let value = String(format: "%.4f", min(1.0, max(0.0, snapshot.brightness)))
+            do {
+                try setBrightness(path: path, displayIndex: displayIndex, value: value)
+            } catch {
+                firstError = firstError ?? error
+            }
+        }
+        if let firstError { throw firstError }
+    }
+
+    private func loadDisplayList(path: String) throws -> [CLIDisplay] {
+        let arguments = ["-lv"]
+        let result = try commandRunner.run(path, arguments: arguments, timeout: 3)
         guard result.status == 0 else {
             throw BrightnessError.commandFailed(
                 path: path,
-                arguments: [value],
+                arguments: arguments,
+                status: result.status,
+                stderr: result.stderr
+            )
+        }
+
+        let output = [result.stdout, result.stderr].joined(separator: "\n")
+        let displays = parseDisplayList(output)
+        guard !displays.isEmpty else {
+            throw BrightnessError.invalidOutput(command: "\(path) -lv", output: output)
+        }
+        return displays
+    }
+
+    private func setBrightness(path: String, displayIndex: Int, value: String) throws {
+        let arguments = ["-d", "\(displayIndex)", value]
+        let result = try commandRunner.run(path, arguments: arguments, timeout: 3)
+        guard result.status == 0 else {
+            throw BrightnessError.commandFailed(
+                path: path,
+                arguments: arguments,
                 status: result.status,
                 stderr: result.stderr
             )
         }
     }
 
-    private func parseBrightness(_ output: String) -> Float? {
-        let lines = output
-            .split(whereSeparator: \.isNewline)
-            .map(String.init)
+    private func parseDisplayList(_ output: String) -> [CLIDisplay] {
+        var displays: [CLIDisplay] = []
+        var displayOffsetsByIndex: [Int: Int] = [:]
 
-        for line in lines where line.localizedCaseInsensitiveContains("brightness") {
-            if let value = lastFloat(in: line) {
-                return min(1.0, max(0.0, value))
+        for rawLine in output.split(whereSeparator: \.isNewline) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let header = parseDisplayHeader(line) {
+                displayOffsetsByIndex[header.index] = displays.count
+                displays.append(header)
+                continue
+            }
+
+            if let (index, brightness) = parseDisplayBrightness(line),
+               let offset = displayOffsetsByIndex[index] {
+                displays[offset].brightness = brightness
             }
         }
 
-        return lastFloat(in: output).map { min(1.0, max(0.0, $0)) }
+        return displays
     }
 
-    private func lastFloat(in string: String) -> Float? {
-        let pattern = #"[-+]?(?:[0-9]*\.[0-9]+|[0-9]+)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+    private func parseDisplayHeader(_ line: String) -> CLIDisplay? {
+        let pattern = #"^display\s+([0-9]+):.*\bID\s+0x([0-9a-fA-F]+)\s*$"#
+        guard let fields = captureGroups(pattern: pattern, in: line),
+              let index = Int(fields[0]),
+              let id = UInt32(fields[1], radix: 16) else {
             return nil
         }
+        return CLIDisplay(index: index, id: id, brightness: nil)
+    }
 
+    private func parseDisplayBrightness(_ line: String) -> (Int, Float)? {
+        let pattern = #"^display\s+([0-9]+):\s+brightness\s+([0-9]*\.?[0-9]+)\s*$"#
+        guard let fields = captureGroups(pattern: pattern, in: line),
+              let index = Int(fields[0]),
+              let brightness = Float(fields[1]) else {
+            return nil
+        }
+        return (index, min(1.0, max(0.0, brightness)))
+    }
+
+    private func captureGroups(pattern: String, in string: String) -> [String]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
         let range = NSRange(string.startIndex..<string.endIndex, in: string)
-        let matches = regex.matches(in: string, range: range)
-        guard let match = matches.last,
-              let matchRange = Range(match.range, in: string) else {
+        guard let match = regex.firstMatch(in: string, range: range) else {
             return nil
         }
+        return (1..<match.numberOfRanges).compactMap { index in
+            guard let range = Range(match.range(at: index), in: string) else {
+                return nil
+            }
+            return String(string[range])
+        }
+    }
 
-        return Float(string[matchRange])
+    private struct CLIDisplay: CustomStringConvertible {
+        var index: Int
+        var id: UInt32
+        var brightness: Float?
+
+        var description: String {
+            let brightnessDescription = brightness.map { String($0) } ?? "unavailable"
+            return "display \(index) (ID \(id), brightness \(brightnessDescription))"
+        }
     }
 }
 
 public final class FallbackInternalBrightnessController: InternalBrightnessManaging {
     private let primary: InternalBrightnessManaging
     private let fallback: InternalBrightnessManaging
-    private var lastSnapshotUsedFallback = false
+    private var lastPrimaryDisplayIDs: Set<UInt32> = []
+    private var lastFallbackDisplayIDs: Set<UInt32> = []
 
     public init(primary: InternalBrightnessManaging, fallback: InternalBrightnessManaging) {
         self.primary = primary
@@ -197,23 +271,41 @@ public final class FallbackInternalBrightnessController: InternalBrightnessManag
     }
 
     public func currentSnapshot() throws -> [InternalDisplaySnapshot] {
+        var primarySnapshots: [InternalDisplaySnapshot] = []
+        var primaryError: Error?
         do {
-            let snapshot = try primary.currentSnapshot()
-            if !snapshot.isEmpty {
-                lastSnapshotUsedFallback = false
-                return snapshot
-            }
+            primarySnapshots = try primary.currentSnapshot()
         } catch {
-            // Fall through to the proven CLI path.
+            primaryError = error
         }
 
-        let snapshot = try fallback.currentSnapshot()
-        lastSnapshotUsedFallback = true
-        return snapshot
+        var fallbackSnapshots: [InternalDisplaySnapshot] = []
+        var fallbackError: Error?
+        do {
+            fallbackSnapshots = try fallback.currentSnapshot()
+        } catch {
+            fallbackError = error
+        }
+
+        var snapshotsByID = Dictionary(
+            uniqueKeysWithValues: fallbackSnapshots.map { ($0.displayID, $0) }
+        )
+        for snapshot in primarySnapshots {
+            snapshotsByID[snapshot.displayID] = snapshot
+        }
+
+        let snapshots = snapshotsByID.values.sorted { $0.displayID < $1.displayID }
+        guard !snapshots.isEmpty else {
+            throw fallbackError ?? primaryError ?? BrightnessError.noBuiltinDisplayFound
+        }
+
+        lastPrimaryDisplayIDs = Set(primarySnapshots.map(\.displayID))
+        lastFallbackDisplayIDs = Set(fallbackSnapshots.map(\.displayID))
+        return snapshots
     }
 
     public func setBrightness(percent: Int) throws {
-        if lastSnapshotUsedFallback {
+        if lastPrimaryDisplayIDs.isEmpty {
             try fallback.setBrightness(percent: percent)
             return
         }
@@ -222,19 +314,42 @@ public final class FallbackInternalBrightnessController: InternalBrightnessManag
             try primary.setBrightness(percent: percent)
         } catch {
             try fallback.setBrightness(percent: percent)
+            if !lastPrimaryDisplayIDs.isSubset(of: lastFallbackDisplayIDs) {
+                throw error
+            }
+            return
+        }
+
+        if !lastFallbackDisplayIDs.subtracting(lastPrimaryDisplayIDs).isEmpty {
+            try fallback.setBrightness(percent: percent)
         }
     }
 
     public func restore(_ snapshots: [InternalDisplaySnapshot]) throws {
-        if snapshots.contains(where: { $0.displayID == BrightnessCLIBrightnessController.snapshotDisplayID }) {
+        guard !snapshots.isEmpty else {
+            return
+        }
+
+        let currentPrimaryIDs: Set<UInt32>
+        do {
+            currentPrimaryIDs = Set(try primary.currentSnapshot().map(\.displayID))
+        } catch {
             try fallback.restore(snapshots)
             return
         }
 
+        let primarySnapshots = snapshots.filter { currentPrimaryIDs.contains($0.displayID) }
+        let fallbackSnapshots = snapshots.filter { !currentPrimaryIDs.contains($0.displayID) }
+
         do {
-            try primary.restore(snapshots)
+            try primary.restore(primarySnapshots)
         } catch {
             try fallback.restore(snapshots)
+            return
+        }
+
+        if !fallbackSnapshots.isEmpty {
+            try fallback.restore(fallbackSnapshots)
         }
     }
 }

@@ -3,17 +3,23 @@ import Foundation
 public struct BrightnessSnapshot: Codable, Equatable, Sendable {
     public var internalDisplays: [InternalDisplaySnapshot]
     public var externalDisplays: [ExternalDisplaySnapshot]
+    public var appliedInternalDisplays: [InternalDisplaySnapshot]?
+    public var appliedExternalDisplays: [ExternalDisplaySnapshot]?
     public var createdAt: Date
     public var appVersion: String
 
     public init(
         internalDisplays: [InternalDisplaySnapshot],
         externalDisplays: [ExternalDisplaySnapshot],
+        appliedInternalDisplays: [InternalDisplaySnapshot]? = nil,
+        appliedExternalDisplays: [ExternalDisplaySnapshot]? = nil,
         createdAt: Date = Date(),
         appVersion: String = "0.1.0"
     ) {
         self.internalDisplays = internalDisplays
         self.externalDisplays = externalDisplays
+        self.appliedInternalDisplays = appliedInternalDisplays
+        self.appliedExternalDisplays = appliedExternalDisplays
         self.createdAt = createdAt
         self.appVersion = appVersion
     }

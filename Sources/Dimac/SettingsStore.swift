@@ -5,7 +5,6 @@ import Foundation
 struct DisplayControlPreference: Codable, Equatable, Identifiable {
     let id: String
     var displayName: String
-    var normalPercent: Int
     var dimPercent: Int
     var updatedAt: Date
 }
@@ -117,14 +116,13 @@ final class SettingsStore: ObservableObject {
     func seedDisplayControl(
         key: String,
         displayName: String,
-        currentPercent: Int?,
+        currentPercent _: Int?,
         defaultDimPercent: Int
     ) -> DisplayControlPreference {
         if let preference = displayControlPreferences[key] {
             let normalizedPreference = Self.normalizedDisplayControlPreference(
                 id: preference.id,
                 displayName: displayName,
-                normalPercent: preference.normalPercent,
                 dimPercent: preference.dimPercent,
                 updatedAt: preference.updatedAt
             )
@@ -139,7 +137,6 @@ final class SettingsStore: ObservableObject {
         let preference = upsertDisplayControlPreference(
             for: key,
             displayName: displayName,
-            normalPercent: DimmerSettings.clampedPercent(currentPercent ?? 100),
             dimPercent: DimmerSettings.clampedPercent(defaultDimPercent),
             existing: nil
         )
@@ -147,22 +144,10 @@ final class SettingsStore: ObservableObject {
     }
 
     @discardableResult
-    func setDisplayNormalPercent(_ value: Int, key: String, displayName: String) -> DisplayControlPreference {
-        upsertDisplayControlPreference(
-            for: key,
-            displayName: displayName,
-            normalPercent: DimmerSettings.clampedPercent(value),
-            dimPercent: displayControlPreferences[key]?.dimPercent ?? DimmerSettings.clampedPercent(dimPercent),
-            existing: displayControlPreferences[key]
-        )
-    }
-
-    @discardableResult
     func setDisplayDimPercent(_ value: Int, key: String, displayName: String) -> DisplayControlPreference {
         upsertDisplayControlPreference(
             for: key,
             displayName: displayName,
-            normalPercent: displayControlPreferences[key]?.normalPercent ?? 100,
             dimPercent: DimmerSettings.clampedPercent(value),
             existing: displayControlPreferences[key]
         )
@@ -217,14 +202,20 @@ final class SettingsStore: ObservableObject {
             return "\(clamped)s"
         }
 
-        let minutes = clamped / 60
-        if minutes < 60 {
-            return "\(minutes)m"
+        let hours = clamped / 3_600
+        let minutes = (clamped % 3_600) / 60
+        let remainderSeconds = clamped % 60
+        var components: [String] = []
+        if hours > 0 {
+            components.append("\(hours)h")
         }
-
-        let hours = minutes / 60
-        let remainder = minutes % 60
-        return remainder == 0 ? "\(hours)h" : "\(hours)h \(remainder)m"
+        if minutes > 0 {
+            components.append("\(minutes)m")
+        }
+        if remainderSeconds > 0 {
+            components.append("\(remainderSeconds)s")
+        }
+        return components.joined(separator: " ")
     }
 
     private static func parseTimeout(_ text: String) -> Int? {
@@ -237,21 +228,43 @@ final class SettingsStore: ObservableObject {
             return nil
         }
 
-        let numberString = normalized
-            .trimmingCharacters(in: CharacterSet(charactersIn: "0123456789").inverted)
-        guard let value = Int(numberString) else {
-            return nil
+        if let minutes = Int(normalized) {
+            let (seconds, overflow) = minutes.multipliedReportingOverflow(by: 60)
+            return overflow ? nil : seconds
         }
 
-        if normalized.contains("h") {
-            return value * 60 * 60
+        let characters = Array(normalized)
+        var offset = 0
+        var totalSeconds = 0
+        while offset < characters.count {
+            let numberStart = offset
+            while offset < characters.count, characters[offset].wholeNumberValue != nil {
+                offset += 1
+            }
+            guard numberStart < offset,
+                  let value = Int(String(characters[numberStart..<offset])),
+                  offset < characters.count else {
+                return nil
+            }
+
+            let multiplier: Int
+            switch characters[offset] {
+            case "h": multiplier = 3_600
+            case "m": multiplier = 60
+            case "s": multiplier = 1
+            default: return nil
+            }
+            offset += 1
+
+            let (componentSeconds, multiplicationOverflow) = value.multipliedReportingOverflow(by: multiplier)
+            let (newTotal, additionOverflow) = totalSeconds.addingReportingOverflow(componentSeconds)
+            guard !multiplicationOverflow, !additionOverflow else {
+                return nil
+            }
+            totalSeconds = newTotal
         }
 
-        if normalized.contains("s") {
-            return value
-        }
-
-        return value * 60
+        return totalSeconds
     }
 
     private static func storedString(forKey key: String, in defaults: UserDefaults, fallback: String) -> String {
@@ -268,14 +281,12 @@ final class SettingsStore: ObservableObject {
     private func upsertDisplayControlPreference(
         for key: String,
         displayName: String,
-        normalPercent: Int,
         dimPercent: Int,
         existing: DisplayControlPreference?
     ) -> DisplayControlPreference {
         let preference = Self.normalizedDisplayControlPreference(
             id: existing?.id ?? key,
             displayName: displayName,
-            normalPercent: normalPercent,
             dimPercent: dimPercent,
             updatedAt: Date()
         )
@@ -309,7 +320,6 @@ final class SettingsStore: ObservableObject {
             normalizedDisplayControlPreference(
                 id: preference.id,
                 displayName: preference.displayName,
-                normalPercent: preference.normalPercent,
                 dimPercent: preference.dimPercent,
                 updatedAt: preference.updatedAt
             )
@@ -319,21 +329,13 @@ final class SettingsStore: ObservableObject {
     private static func normalizedDisplayControlPreference(
         id: String,
         displayName: String,
-        normalPercent: Int,
         dimPercent: Int,
         updatedAt: Date
     ) -> DisplayControlPreference {
-        let normalizedNormalPercent = DimmerSettings.clampedPercent(normalPercent)
-        let normalizedDimPercent = min(
-            normalizedNormalPercent,
-            DimmerSettings.clampedPercent(dimPercent)
-        )
-
         return DisplayControlPreference(
             id: id,
             displayName: displayName,
-            normalPercent: normalizedNormalPercent,
-            dimPercent: normalizedDimPercent,
+            dimPercent: DimmerSettings.clampedPercent(dimPercent),
             updatedAt: updatedAt
         )
     }
