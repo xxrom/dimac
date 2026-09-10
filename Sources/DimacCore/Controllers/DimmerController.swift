@@ -14,6 +14,14 @@ public final class DimmerController: ObservableObject {
     private let externalBrightness: ExternalBrightnessManaging
     private let snapshotStore: SnapshotPersisting
 
+    // Session-only baseline established by a successful explicit app control.
+    // Never seed this from saved configuration or from an idle dim target.
+    private var manualExternalLevels: [String: Int] = [:]
+
+    public func recordManualExternalBrightness(_ percent: Int, for display: ExternalDisplayReference) {
+        manualExternalLevels[display.brightnessPreferenceKey] = min(100, max(0, percent))
+    }
+
     private var activeSnapshot: BrightnessSnapshot?
     private var appliedDimSnapshot: BrightnessSnapshot?
     private var lastDimAttemptAt = Date.distantPast
@@ -71,6 +79,8 @@ public final class DimmerController: ObservableObject {
     public func refreshExternalDisplays() -> [ExternalDisplayReference] {
         do {
             let displays = try externalBrightness.discoverDisplays()
+            let connected = Dictionary(grouping: displays, by: \.brightnessPreferenceKey)
+            manualExternalLevels = manualExternalLevels.filter { connected[$0.key]?.count == 1 }
             externalDisplayCount = displays.count
             if displays.isEmpty {
                 statusMessage = "No DDC external displays found"
@@ -141,27 +151,30 @@ public final class DimmerController: ObservableObject {
                 externalDisplays = []
             }
 
-            let externalSnapshot: [ExternalDisplaySnapshot]
-            do {
-                let captured = try externalBrightness.currentSnapshot(for: externalDisplays)
-                let capturedByKey = Dictionary(grouping: captured) {
-                    $0.display.brightnessPreferenceKey
+            let discoveredByKey = Dictionary(grouping: externalDisplays, by: \.brightnessPreferenceKey)
+            manualExternalLevels = manualExternalLevels.filter { discoveredByKey[$0.key]?.count == 1 }
+            var externalSnapshot: [ExternalDisplaySnapshot] = []
+            for display in externalDisplays {
+                let key = display.brightnessPreferenceKey
+                guard key.hasPrefix("name:"), discoveredByKey[key]?.count == 1 else {
+                    snapshotErrors.append(BrightnessError.readFailed("an external display with an ambiguous identity"))
+                    continue
                 }
-                let discoveredByKey = Dictionary(grouping: externalDisplays, by: \.brightnessPreferenceKey)
-                externalSnapshot = captured.filter { snapshot in
-                    let key = snapshot.display.brightnessPreferenceKey
-                    return capturedByKey[key]?.count == 1
-                        && discoveredByKey[key]?.count == 1
-                        && key.hasPrefix("name:")
+                do {
+                    let captured = try externalBrightness.currentSnapshot(for: [display])
+                    guard captured.count == 1, let value = captured.first,
+                          value.display.brightnessPreferenceKey == key else {
+                        throw BrightnessError.readFailed(display.name)
+                    }
+                    externalSnapshot.append(value)
+                    if manualExternalLevels[key] != nil { manualExternalLevels[key] = value.luminance }
+                } catch {
+                    if let level = manualExternalLevels[key] {
+                        externalSnapshot.append(ExternalDisplaySnapshot(display: display, luminance: level))
+                    } else {
+                        snapshotErrors.append(error)
+                    }
                 }
-                if externalSnapshot.count != captured.count {
-                    snapshotErrors.append(
-                        BrightnessError.readFailed("an external display with an ambiguous identity")
-                    )
-                }
-            } catch {
-                snapshotErrors.append(error)
-                externalSnapshot = []
             }
 
             guard !internalSnapshot.isEmpty || !externalSnapshot.isEmpty else {

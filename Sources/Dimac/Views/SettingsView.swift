@@ -43,6 +43,10 @@ struct SettingsView: View {
         .background(.ultraThinMaterial)
         .onAppear {
             timeoutInput = settings.timeoutText
+            model.refreshCurrentBrightness()
+        }
+        .onChange(of: dimmer.isDimmed) { _ in
+            model.refreshCurrentBrightness()
         }
         .onChange(of: settings.idleTimeoutSeconds) { _ in
             timeoutInput = settings.timeoutText
@@ -311,6 +315,23 @@ struct SettingsView: View {
                     .lineLimit(1)
             }
 
+            CurrentBrightnessSlider(
+                percent: row.currentPercent,
+                requestedPercent: row.requestedPercent,
+                isControllable: row.isControllable
+            ) {
+                model.setCurrentBrightness($0, for: row.id)
+                let updated = model.displayControlRows.first(where: { $0.id == row.id })
+                return updated?.currentPercent ?? updated?.requestedPercent
+            }
+
+            if row.isControllable, row.currentPercent == nil {
+                Text("Reading unavailable. Set brightness here to enable idle dimming for this session. Monitor-button changes cannot be detected.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             sliderRow(title: "Dim", value: row.dimPercent) {
                 Slider(
                     value: Binding(
@@ -487,5 +508,50 @@ struct SettingsView: View {
             .lineLimit(3)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct CurrentBrightnessSlider: View {
+    let percent: Int?
+    let requestedPercent: Int?
+    let isControllable: Bool
+    let apply: (Int) -> Int?
+    @State private var draft: Double = 0
+    @State private var isEditing = false
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text("Now")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: 38, alignment: .leading)
+            Slider(value: $draft, in: 0...100, onEditingChanged: { editing in
+                isEditing = editing
+                if !editing {
+                    draft = Double(apply(Int(draft.rounded())) ?? 0)
+                }
+            })
+            .accessibilityLabel("Current brightness")
+            .disabled(!isControllable)
+            Text(valueLabel)
+                .font(.system(size: 11))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 58, alignment: .trailing)
+        }
+        .help("Adjust screen brightness now. Dim controls the next idle cycle.")
+        .onAppear { draft = Double(percent ?? requestedPercent ?? 0) }
+        .onChange(of: percent) { value in
+            if !isEditing { draft = Double(value ?? requestedPercent ?? 0) }
+        }
+        .onChange(of: requestedPercent) { value in
+            if !isEditing { draft = Double(percent ?? value ?? 0) }
+        }
+    }
+
+    private var valueLabel: String {
+        if isEditing || percent != nil { return "\(Int(draft.rounded()))%" }
+        if let requestedPercent { return "Set \(requestedPercent)%" }
+        return "—"
     }
 }

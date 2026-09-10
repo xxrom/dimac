@@ -6,8 +6,8 @@ The reported stale restore was confirmed. AppModel captured a snapshot with hard
 
 - One controller now owns snapshot, dim, and restore for manual actions, idle/activity, disable, sleep, wake, and quit. Display refresh only discovers displays.
 - Actual brightness is captured immediately before dimming. Each dim target is capped at the captured value, including zero brightness.
-- Settings store only dim targets. Legacy `normalPercent` fields are ignored; the Bright slider is removed. Changes apply on the next idle cycle.
-- Repeated dim calls retain the original snapshot. Displays without readable brightness are not dimmed.
+- Settings store only dim targets. Legacy `normalPercent` fields are ignored. The new “Now” slider reads and adjusts current brightness directly, while “Dim” changes apply on the next idle cycle. Manual adjustments finish any active dim cycle before writing, so subsequent activity cannot undo the choice.
+- Repeated dim calls retain the original snapshot. Displays without readable brightness are dimmed only after a successful manual app setting establishes a session baseline.
 - Restore checks for brightness changes since dimming, preserving observable manual changes. Failed restores retain recovery data.
 - CLI brightness uses display IDs and resolves current indexes before targeted writes. A disconnected display does not cause a write to another screen.
 - Built-in DisplayServices bindings use integer return codes with zero indicating success. The previous Bool binding inverted success handling.
@@ -23,6 +23,7 @@ Tests cover live restoration despite stale config, independent dim targets, alre
 
 - `swift build --disable-sandbox`: passed using temporary writable compiler caches.
 - Eight standalone smoke scenarios linked against the built DimacCore code: passed (live restore, already-dark screen, manual override, repeated dim, retry, disable, restart/manual override, restart/restore).
+- Five additional live-control integration scenarios linked against the built app/core code: passed (manual level becomes the next restore level without persisting it, adjustment during dimming, failed writes, DDC selector changes/ambiguous identity, and manual control when brightness reads fail).
 - `git diff --check`: passed.
 - `zsh scripts/test.sh`: blocked because the selected Command Line Tools installation lacks XCTest. The full regression suite must run with Xcode or in macOS CI.
 - No brightness writes to physical monitors and no replacement of the installed application were performed.
@@ -47,3 +48,16 @@ Automated mocks cannot prove every monitor's DDC timing or macOS brightness-key 
 - Helper commands run synchronously on the main actor. Slow or unavailable DDC monitors can delay the UI and restoration. A serialized asynchronous hardware worker is a useful next improvement.
 - Screen preferences use CoreGraphics display IDs; stable hardware IDs would improve preference continuity across reconfiguration.
 - The settings dictionary currently decodes as one unit. Per-entry recovery could preserve valid preferences if one stored entry is corrupted.
+
+## External-control follow-up
+
+The initial “Now” slider incorrectly required a successful brightness read before enabling manual writes. The connected MSI PS341WU was discoverable, but its DDC brightness-read command returned no value. Manual controls now remain enabled for matched displays even when reading fails; the UI distinguishes the last requested value from a confirmed reading. Automatic idle dimming now accepts the last successful manual app setting as a session baseline when live reads fail. Live reads take priority; failed manual writes never replace the baseline. Observed disconnection clears it, and it is not loaded from configuration after restart. An active dim snapshot remains recoverable after restart.
+
+
+## TDD follow-up: write-capable monitors without read support
+
+The earlier tests covered manual writes and skipped unreadable monitors separately, missing their combined idle/wake flow. The new app-level regression failed before the fix (43 remained 43 instead of dimming to 10). A second regression failed before disconnect invalidation was added.
+
+The checked-in `scripts/test-clt.py` executes the actual synchronous test methods with assertion helpers, linking built production objects. All 48 scenarios pass on this CLT-only Mac. Full XCTest still requires Xcode. Coverage includes mixed internal/external cycles, 0/5/43/100 starting levels, independent targets, unknown baselines, live-read precedence, unsuccessful writes, adjustment during dimming, retry, restart recovery, disconnection, ambiguity, routing, and configuration behavior.
+
+For a monitor without read support, successful writes are assumed to have applied. Physical monitor-button changes and disconnects missed between discovery calls cannot be detected. Hardware validation remains necessary.

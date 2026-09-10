@@ -16,7 +16,7 @@ Dimac is a macOS menu bar app for Apple Silicon MacBooks that lowers internal an
 - Captures actual brightness before each dim cycle; saved settings never define the restore level.
 - Leaves screens that are already darker than the dim target at their current brightness.
 
-Set the timeout and dim level to get started. Advanced settings allow a different dim level for each display. Changes apply on the next idle cycle. The former “Bright” setting is no longer needed; use macOS or your monitor controls to choose your working brightness.
+Set the timeout and dim level to get started. Advanced settings allow a different dim level for each display. Changes apply on the next idle cycle. Use the “Now” slider under Advanced → Displays to adjust a screen’s current brightness from Dimac. It reads the live value and applies your choice when you release the slider. “Dim” sets the next idle target; current brightness is never saved as a restore preference. If a monitor cannot report brightness, manual adjustment remains available and “Set N%” shows the last requested level. A successful manual setting enables idle dimming for that monitor during this app session, using that level for restoration when reading is unavailable. Set it again after restarting the app or an observed disconnect. Changes through monitor buttons cannot be detected without readable brightness.
 
 ## Requirements
 
@@ -62,3 +62,5 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [
 ## License
 
 Dimac is available under the [MIT License](LICENSE).
+
+Run regression tests with `zsh scripts/test.sh` using full Xcode. On a Command Line Tools-only Mac, `python3 scripts/test-clt.py` executes the synchronous test scenarios with a lightweight assertion runner against the built app and core. It does not replace XCTest lifecycle or hardware testing.

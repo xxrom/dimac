@@ -18,6 +18,11 @@ final class AppModel: ObservableObject {
     private let idleReader = IOKitIdleTimeReader()
     private let externalBrightness: ExternalBrightnessManaging
     private let displayDiscovery: ConnectedDisplayDiscovery
+    private let displayProvider: (() -> [ConnectedDisplayRow])?
+    private lazy var internalBrightness = makeInternalBrightnessController()
+    private lazy var brightnessControls: CurrentBrightnessManaging = CurrentBrightnessController(
+        internalBrightness: internalBrightness, externalBrightness: externalBrightness
+    )
     lazy var dimmer: DimmerController = makeDimmer()
     private lazy var statusItemController = StatusItemController(model: self)
     private lazy var settingsWindowController = SettingsWindowController(model: self)
@@ -25,7 +30,14 @@ final class AppModel: ObservableObject {
     private var idleTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
 
-    init(settings: SettingsStore? = nil, dimmer: DimmerController? = nil, startAutomatically: Bool = true) {
+    init(
+        settings: SettingsStore? = nil,
+        dimmer: DimmerController? = nil,
+        startAutomatically: Bool = true,
+        brightnessControls: CurrentBrightnessManaging? = nil,
+        displayProvider: (() -> [ConnectedDisplayRow])? = nil
+    ) {
+        self.displayProvider = displayProvider
         let settings = settings ?? SettingsStore()
         self.settings = settings
 
@@ -39,6 +51,9 @@ final class AppModel: ObservableObject {
 
         if let dimmer {
             self.dimmer = dimmer
+        }
+        if let brightnessControls {
+            self.brightnessControls = brightnessControls
         }
         if startAutomatically {
             AppRuntime.model = self
@@ -71,7 +86,7 @@ final class AppModel: ObservableObject {
     func refreshExternalDisplays() {
         let pendingRestoreStatus = dimmer.isDimmed ? dimmer.statusMessage : nil
         let pendingRestoreError = dimmer.isDimmed ? dimmer.lastError : nil
-        let connectedDisplays = displayDiscovery.displays()
+        let connectedDisplays = displayProvider?() ?? displayDiscovery.displays()
         connectedExternalDisplayRows = connectedDisplays.filter(\.isExternal)
         let ddcDisplays = dimmer.refreshExternalDisplays()
 
@@ -79,6 +94,7 @@ final class AppModel: ObservableObject {
             from: connectedDisplays,
             ddcDisplays: ddcDisplays
         )
+        refreshCurrentBrightness()
         ddcDisplayCount = matchedExternalDDCDisplayCount(in: displayControlRows)
 
         if let status = Self.externalDisplayStatus(
@@ -133,6 +149,43 @@ final class AppModel: ObservableObject {
             percent, key: row.preferenceKey, displayName: row.name
         )
         displayControlRows[rowIndex].dimPercent = preference.dimPercent
+    }
+
+    func refreshCurrentBrightness() {
+        for index in displayControlRows.indices {
+            let row = displayControlRows[index]
+            displayControlRows[index].currentPercent = row.isControllable
+                ? try? brightnessControls.read(row) : nil
+        }
+    }
+
+    func setCurrentBrightness(_ percent: Int, for rowID: String) {
+        guard let index = displayControlRows.firstIndex(where: { $0.id == rowID }),
+              displayControlRows[index].isControllable else { return }
+        // Finish the idle cycle first so later activity cannot undo this explicit choice,
+        // including when the chosen value equals the dim target.
+        if dimmer.isDimmed {
+            dimmer.restoreNow(reason: "brightness adjustment")
+            guard !dimmer.isDimmed else {
+                refreshCurrentBrightness()
+                return
+            }
+        }
+        let row = displayControlRows[index]
+        do {
+            try brightnessControls.set(percent, for: row)
+            displayControlRows[index].requestedPercent = min(100, max(0, percent))
+            displayControlRows[index].currentPercent = try? brightnessControls.read(row)
+            if case .ddc(let display) = row.mode {
+                dimmer.recordManualExternalBrightness(displayControlRows[index].currentPercent ?? percent, for: display)
+            }
+            dimmer.setStatus(displayControlRows[index].currentPercent == nil
+                ? "Brightness sent; monitor does not report its level"
+                : "Brightness adjusted")
+        } catch {
+            displayControlRows[index].currentPercent = try? brightnessControls.read(row)
+            dimmer.setStatus("Brightness adjustment failed", error: error.localizedDescription)
+        }
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
@@ -374,7 +427,7 @@ final class AppModel: ObservableObject {
                 }
                 return result
             },
-            internalBrightness: makeInternalBrightnessController(),
+            internalBrightness: internalBrightness,
             externalBrightness: externalBrightness,
             snapshotStore: FileSnapshotStore()
         )
@@ -423,6 +476,8 @@ struct DisplayControlRow: Identifiable, Equatable {
     let resolution: String
     let isExternal: Bool
     var dimPercent: Int
+    var currentPercent: Int? = nil
+    var requestedPercent: Int? = nil
     let mode: DisplayControlMode
 
     var controlDescription: String {
