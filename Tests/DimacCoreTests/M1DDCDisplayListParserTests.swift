@@ -18,6 +18,21 @@ final class M1DDCDisplayListParserTests: XCTestCase {
         XCTAssertEqual(displays[1].name, "MSI PS341WU")
         XCTAssertEqual(displays[2].selector, "3")
         XCTAssertEqual(displays[2].name, "Dell U2720Q")
+        XCTAssertEqual(displays[2].uuid, "37D8832A-2D66-02CA-B9F7-8F30A301B230")
+        XCTAssertNil(displays[0].uuid)
+    }
+
+    func testCapturesUUIDAcrossFormatsWithoutRemovingOrdinaryParentheses() {
+        let displays = M1DDCDisplayListParser().parse("""
+        1: Dell (USB-C) (37d8832a-2d66-02ca-b9f7-8f30a301b230)
+        Display 2 - Dell (USB-C) (37D8832A-2D66-02CA-B9F7-8F30A301B231)
+        [3] Dell (USB-C)
+        """)
+
+        XCTAssertEqual(displays.map(\.name), Array(repeating: "Dell (USB-C)", count: 3))
+        XCTAssertEqual(displays[0].uuid, "37D8832A-2D66-02CA-B9F7-8F30A301B230")
+        XCTAssertEqual(displays[1].uuid, "37D8832A-2D66-02CA-B9F7-8F30A301B231")
+        XCTAssertNil(displays[2].uuid)
     }
 
     func testIgnoresUnnumberedLines() {

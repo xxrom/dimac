@@ -3,6 +3,312 @@ import XCTest
 
 @MainActor
 final class DimmerControllerTests: XCTestCase {
+    func testFileSnapshotRetainsUUIDRecoveryAcrossDisconnectAndRestart() throws {
+        let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("snapshot.json")
+        defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
+        let uuid = "11111111-1111-1111-1111-111111111111"
+        let original = ExternalDisplayReference(selector: "1", name: "Monitor", uuid: uuid)
+        let external = MultiExternalBrightnessController(displays: [original], luminanceBySelector: ["1": 65])
+        let internalController = MockInternalBrightnessController()
+        let store = FileSnapshotStore(fileURL: fileURL)
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: internalController, externalBrightness: external, snapshotStore: store)
+        controller.dimNow()
+        external.connectedSelectors = []
+        controller.handleUserActivity()
+        XCTAssertEqual(try store.load()?.externalDisplays.first?.luminance, 65)
+
+        let reopenedStore = FileSnapshotStore(fileURL: fileURL)
+        let restarted = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: internalController, externalBrightness: external, snapshotStore: reopenedStore)
+        restarted.restorePersistedSnapshotIfNeeded()
+        external.displays = [ExternalDisplayReference(selector: "7", name: "Renamed", uuid: uuid)]
+        external.connectedSelectors = ["7"]
+        external.luminanceBySelector["7"] = 10
+        restarted.refreshExternalDisplays()
+
+        XCTAssertEqual(external.luminanceBySelector["7"], 65)
+        XCTAssertFalse(restarted.isDimmed)
+        XCTAssertNil(try reopenedStore.load())
+    }
+
+    func testUUIDReconnectRestoresDisplayAfterNameAndSelectorChange() {
+        let uuid = "11111111-1111-1111-1111-111111111111"
+        let original = ExternalDisplayReference(selector: "1", name: "Original", uuid: uuid)
+        let external = MultiExternalBrightnessController(displays: [original], luminanceBySelector: ["1": 65])
+        let store = MemorySnapshotStore()
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(), externalBrightness: external, snapshotStore: store)
+        controller.dimNow()
+        external.connectedSelectors = []
+        controller.handleUserActivity()
+
+        external.displays = [ExternalDisplayReference(selector: "7", name: "Renamed", uuid: uuid)]
+        external.connectedSelectors = ["7"]
+        external.luminanceBySelector["7"] = 10
+        controller.refreshExternalDisplays()
+
+        XCTAssertEqual(external.luminanceBySelector["7"], 65)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testDifferentUUIDWithSameNameDoesNotReceiveSavedBrightness() {
+        let original = ExternalDisplayReference(selector: "1", name: "Monitor", uuid: "11111111-1111-1111-1111-111111111111")
+        let external = MultiExternalBrightnessController(displays: [original], luminanceBySelector: ["1": 65])
+        let store = MemorySnapshotStore()
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(), externalBrightness: external, snapshotStore: store)
+        controller.dimNow()
+        external.connectedSelectors = []
+        controller.handleUserActivity()
+
+        external.displays = [ExternalDisplayReference(selector: "7", name: "Monitor", uuid: "22222222-2222-2222-2222-222222222222")]
+        external.connectedSelectors = ["7"]
+        external.luminanceBySelector["7"] = 40
+        controller.refreshExternalDisplays()
+
+        XCTAssertEqual(external.luminanceBySelector["7"], 40)
+        XCTAssertEqual(external.restoreSelectors, ["1"])
+        XCTAssertEqual(store.snapshot?.externalDisplays.first?.luminance, 65)
+    }
+
+    func testSameNameDisplaysWithDistinctUUIDsHaveIndependentRestoreValues() {
+        let first = ExternalDisplayReference(selector: "1", name: "Monitor", uuid: "11111111-1111-1111-1111-111111111111")
+        let second = ExternalDisplayReference(selector: "2", name: "Monitor", uuid: "22222222-2222-2222-2222-222222222222")
+        let external = MultiExternalBrightnessController(displays: [first, second], luminanceBySelector: ["1": 60, "2": 80])
+        let store = MemorySnapshotStore()
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(), externalBrightness: external, snapshotStore: store)
+        controller.dimNow()
+        XCTAssertEqual(external.luminanceBySelector["1"], 10)
+        XCTAssertEqual(external.luminanceBySelector["2"], 10)
+        controller.handleUserActivity()
+
+        XCTAssertEqual(external.luminanceBySelector["1"], 60)
+        XCTAssertEqual(external.luminanceBySelector["2"], 80)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testSameNameMixedIdentityDisplaysDimOnlyUniquelyIdentifiedUUIDDisplay() {
+        let identified = ExternalDisplayReference(selector: "1", name: "Monitor", uuid: "11111111-1111-1111-1111-111111111111")
+        let ambiguous = ExternalDisplayReference(selector: "2", name: "Monitor")
+        let external = MultiExternalBrightnessController(displays: [identified, ambiguous], luminanceBySelector: ["1": 60, "2": 80])
+        let store = MemorySnapshotStore()
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(), externalBrightness: external, snapshotStore: store)
+
+        controller.dimNow()
+
+        XCTAssertEqual(external.luminanceBySelector["1"], 10)
+        XCTAssertEqual(external.luminanceBySelector["2"], 80)
+        XCTAssertEqual(external.restoreSelectors, ["1"])
+        XCTAssertEqual(controller.statusMessage, "Dimmed with warnings")
+        let dimError = controller.lastError
+        XCTAssertNotNil(dimError)
+        controller.refreshExternalDisplays()
+        XCTAssertEqual(controller.statusMessage, "Dimmed with warnings")
+        XCTAssertEqual(controller.lastError, dimError)
+
+        controller.handleUserActivity()
+        XCTAssertEqual(external.luminanceBySelector["1"], 60)
+        XCTAssertEqual(external.luminanceBySelector["2"], 80)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testLegacyNameSnapshotRetainsManualAdjustmentGuardWhenUUIDBecomesAvailable() {
+        let legacy = ExternalDisplayReference(selector: "1", name: "Monitor")
+        let current = ExternalDisplayReference(selector: "7", name: "Monitor", uuid: "11111111-1111-1111-1111-111111111111")
+        let external = MultiExternalBrightnessController(displays: [current], luminanceBySelector: ["7": 47])
+        let store = MemorySnapshotStore()
+        store.snapshot = BrightnessSnapshot(internalDisplays: [], externalDisplays: [ExternalDisplaySnapshot(display: legacy, luminance: 65)], appliedExternalDisplays: [ExternalDisplaySnapshot(display: legacy, luminance: 10)])
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(), externalBrightness: external, snapshotStore: store)
+
+        controller.restorePersistedSnapshotIfNeeded()
+
+        XCTAssertEqual(external.luminanceBySelector["7"], 47)
+        XCTAssertTrue(external.restoreSelectors.isEmpty)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testQuantizedExternalDimReadbackRestoresOriginalBrightness() {
+        let external = MockExternalBrightnessController()
+        external.dimReadback = 9
+        let store = MemorySnapshotStore()
+        let controller = makeController(internalController: MockInternalBrightnessController(), externalController: external, store: store)
+
+        controller.dimNow()
+        XCTAssertEqual(external.currentLuminance, 9)
+        XCTAssertEqual(store.snapshot?.appliedExternalDisplays?.first?.luminance, 9)
+        controller.handleUserActivity()
+
+        XCTAssertEqual(external.currentLuminance, 65)
+        XCTAssertFalse(controller.isDimmed)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testManualAdjustmentAfterQuantizedDimIsPreserved() {
+        let external = MockExternalBrightnessController()
+        external.dimReadback = 9
+        let store = MemorySnapshotStore()
+        let controller = makeController(internalController: MockInternalBrightnessController(), externalController: external, store: store)
+
+        controller.dimNow()
+        external.currentLuminance = 11
+        controller.handleUserActivity()
+
+        XCTAssertEqual(external.currentLuminance, 11)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testUnavailableDimReadbackDoesNotTurnRequestedTargetIntoManualChangeBaseline() {
+        let external = MockExternalBrightnessController()
+        external.dimReadback = 9
+        external.failReadbackAfterWrite = true
+        let store = MemorySnapshotStore()
+        let controller = makeController(internalController: MockInternalBrightnessController(), externalController: external, store: store)
+
+        controller.dimNow()
+        external.failReadbackAfterWrite = false
+        controller.handleUserActivity()
+
+        XCTAssertEqual(external.currentLuminance, 65)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testStaleUnchangedReadbackDoesNotSuppressLaterRestore() {
+        let external = MockExternalBrightnessController()
+        external.dimReadback = 65
+        let store = MemorySnapshotStore()
+        let controller = makeController(internalController: MockInternalBrightnessController(), externalController: external, store: store)
+
+        controller.dimNow()
+        // DDC can return its cached pre-dim value before the monitor applies the write.
+        external.currentLuminance = 9
+        controller.handleUserActivity()
+
+        XCTAssertEqual(external.currentLuminance, 65)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testQuantizedDimBaselineSurvivesControllerRestart() {
+        let external = MockExternalBrightnessController()
+        external.dimReadback = 9
+        let internalController = MockInternalBrightnessController()
+        let store = MemorySnapshotStore()
+        let controller = makeController(internalController: internalController, externalController: external, store: store)
+        controller.dimNow()
+
+        let restarted = makeController(internalController: internalController, externalController: external, store: store)
+        restarted.restorePersistedSnapshotIfNeeded()
+
+        XCTAssertEqual(external.currentLuminance, 65)
+        XCTAssertFalse(restarted.isDimmed)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testDisconnectedExternalRestoresOnRefreshWithNewSelectorAfterWake() {
+        let original = ExternalDisplayReference(selector: "1", name: "Monitor")
+        let external = MultiExternalBrightnessController(displays: [original], luminanceBySelector: ["1": 65])
+        let internalController = MockInternalBrightnessController()
+        let store = MemorySnapshotStore()
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: internalController, externalBrightness: external, snapshotStore: store)
+
+        controller.dimNow()
+        external.connectedSelectors = []
+        controller.handleUserActivity()
+
+        XCTAssertEqual(internalController.currentBrightness, 0.7, accuracy: 0.0001)
+        XCTAssertEqual(store.snapshot?.externalDisplays.first?.luminance, 65)
+        XCTAssertTrue(store.snapshot?.internalDisplays.isEmpty == true)
+
+        external.displays = [ExternalDisplayReference(selector: "7", name: "Monitor")]
+        external.connectedSelectors = ["7"]
+        external.luminanceBySelector["7"] = 10
+        controller.refreshExternalDisplays()
+
+        XCTAssertEqual(external.luminanceBySelector["7"], 65)
+        XCTAssertEqual(external.restoreSelectors.last, "7")
+        XCTAssertFalse(controller.isDimmed)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testDisplayRefreshBeforeWakeDoesNotRestoreDimmedDisplay() {
+        let external = MockExternalBrightnessController()
+        let store = MemorySnapshotStore()
+        let controller = makeController(internalController: MockInternalBrightnessController(), externalController: external, store: store)
+
+        controller.dimNow()
+        controller.refreshExternalDisplays()
+
+        XCTAssertEqual(external.currentLuminance, 10)
+        XCTAssertTrue(controller.isDimmed)
+        XCTAssertNotNil(store.snapshot)
+    }
+
+    func testPendingDisconnectedExternalSurvivesRestartAndRestoresOnReconnect() {
+        let original = ExternalDisplayReference(selector: "1", name: "Monitor")
+        let external = MultiExternalBrightnessController(displays: [original], luminanceBySelector: ["1": 65])
+        let internalController = MockInternalBrightnessController()
+        let store = MemorySnapshotStore()
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: internalController, externalBrightness: external, snapshotStore: store)
+        controller.dimNow()
+        external.connectedSelectors = []
+        controller.handleUserActivity()
+
+        let restarted = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: internalController, externalBrightness: external, snapshotStore: store)
+        restarted.restorePersistedSnapshotIfNeeded()
+        XCTAssertNotNil(store.snapshot)
+        external.displays = [ExternalDisplayReference(selector: "7", name: "Monitor")]
+        external.connectedSelectors = ["7"]
+        external.luminanceBySelector["7"] = 10
+        restarted.refreshExternalDisplays()
+
+        XCTAssertEqual(external.luminanceBySelector["7"], 65)
+        XCTAssertFalse(restarted.isDimmed)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testIdleTimerRetriesPendingExternalRestoreEvenAfterIdleThreshold() {
+        let external = MockExternalBrightnessController()
+        let store = MemorySnapshotStore()
+        var now = Date(timeIntervalSince1970: 1_000)
+        let controller = DimmerController(settingsProvider: { DimmerSettings(idleTimeoutSeconds: 10, dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(), externalBrightness: external, snapshotStore: store, now: { now })
+        controller.dimNow()
+        external.restoreError = TestError.failed
+        controller.handleUserActivity()
+        XCTAssertNotNil(store.snapshot)
+
+        external.restoreError = nil
+        controller.handleIdleTime(20)
+        XCTAssertEqual(external.currentLuminance, 10)
+        now.addTimeInterval(5)
+        controller.handleIdleTime(20)
+
+        XCTAssertEqual(external.currentLuminance, 65)
+        XCTAssertFalse(controller.isDimmed)
+        XCTAssertNil(store.snapshot)
+    }
+
+    func testPendingExternalDoesNotPreventNewInternalDimCycleOrReplaceExternalBaseline() {
+        let display = ExternalDisplayReference(selector: "1", name: "Monitor")
+        let external = MultiExternalBrightnessController(displays: [display], luminanceBySelector: ["1": 65])
+        let internalController = MockInternalBrightnessController()
+        let store = MemorySnapshotStore()
+        var now = Date(timeIntervalSince1970: 1_000)
+        let controller = DimmerController(settingsProvider: { DimmerSettings(idleTimeoutSeconds: 10, dimPercent: 10) }, internalBrightness: internalController, externalBrightness: external, snapshotStore: store, now: { now })
+        controller.dimNow()
+        external.connectedSelectors = []
+        controller.handleUserActivity()
+        XCTAssertEqual(internalController.currentBrightness, 0.7, accuracy: 0.0001)
+
+        internalController.currentBrightness = 0.8
+        now.addTimeInterval(10)
+        controller.handleIdleTime(20)
+        XCTAssertEqual(internalController.currentBrightness, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(store.snapshot?.externalDisplays.first?.luminance, 65)
+        controller.handleUserActivity()
+        XCTAssertEqual(internalController.currentBrightness, 0.8, accuracy: 0.0001)
+
+        external.connectedSelectors = ["1"]
+        controller.refreshExternalDisplays()
+        XCTAssertEqual(external.luminanceBySelector["1"], 65)
+        XCTAssertNil(store.snapshot)
+    }
+
     func testObservedDisconnectInvalidatesManualFallback() {
         let display = ExternalDisplayReference(selector: "1", name: "Monitor")
         let external = MultiExternalBrightnessController(displays: [display], luminanceBySelector: [:])
@@ -206,10 +512,12 @@ final class DimmerControllerTests: XCTestCase {
         let internalController = MockInternalBrightnessController()
         let externalController = MockExternalBrightnessController()
         let store = MemorySnapshotStore()
+        var now = Date(timeIntervalSince1970: 1_000)
         let controller = makeController(
             internalController: internalController,
             externalController: externalController,
-            store: store
+            store: store,
+            now: { now }
         )
 
         controller.dimNow()
@@ -222,6 +530,7 @@ final class DimmerControllerTests: XCTestCase {
         XCTAssertEqual(controller.statusMessage, "Restore failed; will retry")
 
         internalController.restoreError = nil
+        now.addTimeInterval(5)
         controller.handleUserActivity()
 
         XCTAssertFalse(controller.isDimmed)
@@ -298,7 +607,7 @@ final class DimmerControllerTests: XCTestCase {
         XCTAssertEqual(store.snapshot?.externalDisplays.map(\.display.name), ["Right"])
 
         externalController.connectedSelectors = ["1", "2"]
-        controller.handleUserActivity()
+        controller.refreshExternalDisplays()
 
         XCTAssertFalse(controller.isDimmed)
         XCTAssertEqual(externalController.luminanceBySelector["2"], 70)
@@ -356,7 +665,8 @@ final class DimmerControllerTests: XCTestCase {
     private func makeController(
         internalController: MockInternalBrightnessController,
         externalController: MockExternalBrightnessController,
-        store: MemorySnapshotStore
+        store: MemorySnapshotStore,
+        now: @escaping () -> Date = Date.init
     ) -> DimmerController {
         DimmerController(
             settingsProvider: {
@@ -364,7 +674,8 @@ final class DimmerControllerTests: XCTestCase {
             },
             internalBrightness: internalController,
             externalBrightness: externalController,
-            snapshotStore: store
+            snapshotStore: store,
+            now: now
         )
     }
 }
@@ -397,12 +708,17 @@ private final class MockExternalBrightnessController: ExternalBrightnessManaging
     var snapshotError: Error?
     var restoreError: Error?
     var restoreCallCount = 0
+    var dimReadback: Int?
+    var failReadbackAfterWrite = false
 
     func discoverDisplays() throws -> [ExternalDisplayReference] {
         [display]
     }
 
     func currentSnapshot(for displays: [ExternalDisplayReference]) throws -> [ExternalDisplaySnapshot] {
+        if failReadbackAfterWrite, restoreCallCount > 0 {
+            throw TestError.failed
+        }
         if let snapshotError {
             throw snapshotError
         }
@@ -418,7 +734,9 @@ private final class MockExternalBrightnessController: ExternalBrightnessManaging
         if let restoreError {
             throw restoreError
         }
-        currentLuminance = snapshots.first?.luminance ?? currentLuminance
+        if let luminance = snapshots.first?.luminance {
+            currentLuminance = luminance == 10 ? (dimReadback ?? luminance) : luminance
+        }
     }
 }
 
@@ -427,7 +745,7 @@ private enum TestError: Error {
 }
 
 private final class MultiExternalBrightnessController: ExternalBrightnessManaging {
-    let displays: [ExternalDisplayReference]
+    var displays: [ExternalDisplayReference]
     var connectedSelectors: Set<String>
     var luminanceBySelector: [String: Int]
     var restoreSelectors: [String] = []

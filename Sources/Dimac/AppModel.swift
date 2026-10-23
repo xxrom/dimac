@@ -84,8 +84,6 @@ final class AppModel: ObservableObject {
     }
 
     func refreshExternalDisplays() {
-        let pendingRestoreStatus = dimmer.isDimmed ? dimmer.statusMessage : nil
-        let pendingRestoreError = dimmer.isDimmed ? dimmer.lastError : nil
         let connectedDisplays = displayProvider?() ?? displayDiscovery.displays()
         connectedExternalDisplayRows = connectedDisplays.filter(\.isExternal)
         let ddcDisplays = dimmer.refreshExternalDisplays()
@@ -97,14 +95,11 @@ final class AppModel: ObservableObject {
         refreshCurrentBrightness()
         ddcDisplayCount = matchedExternalDDCDisplayCount(in: displayControlRows)
 
-        if let status = Self.externalDisplayStatus(
+        if !(dimmer.isDimmed && dimmer.lastError != nil), let status = Self.externalDisplayStatus(
             connectedCount: connectedExternalDisplayRows.count,
             ddcCount: ddcDisplayCount
         ) {
             dimmer.setStatus(status)
-        }
-        if let pendingRestoreError, let pendingRestoreStatus {
-            dimmer.setStatus(pendingRestoreStatus, error: pendingRestoreError)
         }
     }
 
@@ -162,16 +157,26 @@ final class AppModel: ObservableObject {
     func setCurrentBrightness(_ percent: Int, for rowID: String) {
         guard let index = displayControlRows.firstIndex(where: { $0.id == rowID }),
               displayControlRows[index].isControllable else { return }
+        let row = displayControlRows[index]
         // Finish the idle cycle first so later activity cannot undo this explicit choice,
         // including when the chosen value equals the dim target.
         if dimmer.isDimmed {
             dimmer.restoreNow(reason: "brightness adjustment")
-            guard !dimmer.isDimmed else {
+            let hasPendingRestore: Bool
+            switch row.mode {
+            case .ddc(let display):
+                hasPendingRestore = dimmer.hasPendingRestore(for: display)
+            case .brightnessCLI:
+                let displayID = UInt32(row.preferenceKey.replacingOccurrences(of: "display:", with: ""))
+                hasPendingRestore = displayID.map { dimmer.hasPendingRestore(forInternalDisplayID: $0) } ?? dimmer.isDimmed
+            case .unsupported:
+                return
+            }
+            guard !hasPendingRestore else {
                 refreshCurrentBrightness()
                 return
             }
         }
-        let row = displayControlRows[index]
         do {
             try brightnessControls.set(percent, for: row)
             displayControlRows[index].requestedPercent = min(100, max(0, percent))

@@ -20,7 +20,7 @@ public struct M1DDCDisplayListParser {
                 }
 
                 let patterns = [
-                    #"^\s*\[([0-9]+)\]\s*(.*?)\s*(?:\([0-9A-Fa-f-]+\))?\s*$"#,
+                    #"^\s*\[([0-9]+)\]\s*(.*?)\s*$"#,
                     #"^\s*Display\s+([0-9]+)\b[:.)\-\s]*(.*)$"#,
                     #"^\s*([0-9]+)\b[:.)\-\s]*(.*)$"#
                 ]
@@ -41,14 +41,22 @@ public struct M1DDCDisplayListParser {
 
                     let selector = String(line[selectorRange])
                     var name = "Display \(selector)"
+                    var uuid: String?
                     if match.numberOfRanges >= 3, let nameRange = Range(match.range(at: 2), in: line) {
-                        let candidate = String(line[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        var candidate = String(line[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if candidate.hasSuffix(")"), let start = candidate.lastIndex(of: "(") {
+                            let value = String(candidate[candidate.index(after: start)..<candidate.index(before: candidate.endIndex)])
+                            if let identity = UUID(uuidString: value) {
+                                uuid = identity.uuidString
+                                candidate = String(candidate[..<start]).trimmingCharacters(in: .whitespacesAndNewlines)
+                            }
+                        }
                         if !candidate.isEmpty, candidate != "(null)" {
                             name = candidate
                         }
                     }
 
-                    return ExternalDisplayReference(selector: selector, name: name)
+                    return ExternalDisplayReference(selector: selector, name: name, uuid: uuid)
                 }
 
                 return nil

@@ -16,6 +16,8 @@ Dimac is a macOS menu bar app for Apple Silicon MacBooks that lowers internal an
 - Captures actual brightness before each dim cycle; saved settings never define the restore level.
 - Leaves screens that are already darker than the dim target at their current brightness.
 
+If an external monitor is unplugged while dimmed, Dimac keeps its previous brightness in the recovery snapshot, including across app restarts. After activity resumes, reconnecting that monitor retries its restoration automatically; temporary command failures also retry every five seconds. Other displays can continue their normal dim/wake cycles while recovery is pending. Recovery uses the monitor UUID reported by `m1ddc` when available, otherwise a unique display name; ambiguous matches remain pending rather than changing another monitor.
+
 Set the timeout and dim level to get started. Advanced settings allow a different dim level for each display. Changes apply on the next idle cycle. Use the “Now” slider under Advanced → Displays to adjust a screen’s current brightness from Dimac. It reads the live value and applies your choice when you release the slider. “Dim” sets the next idle target; current brightness is never saved as a restore preference. If a monitor cannot report brightness, manual adjustment remains available and “Set N%” shows the last requested level. A successful manual setting enables idle dimming for that monitor during this app session, using that level for restoration when reading is unavailable. Set it again after restarting the app or an observed disconnect. Changes through monitor buttons cannot be detected without readable brightness.
 
 ## Requirements

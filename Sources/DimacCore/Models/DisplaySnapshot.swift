@@ -43,11 +43,13 @@ public struct ExternalDisplayReference: Codable, Equatable, Hashable, Identifiab
     public var selector: String?
     public var name: String
     public var isDefaultFallback: Bool
+    public var uuid: String?
 
-    public init(selector: String?, name: String, isDefaultFallback: Bool = false) {
+    public init(selector: String?, name: String, isDefaultFallback: Bool = false, uuid: String? = nil) {
         self.selector = selector
         self.name = name
         self.isDefaultFallback = isDefaultFallback
+        self.uuid = uuid.flatMap { UUID(uuidString: $0)?.uuidString }
     }
 
     public var id: String {
@@ -73,6 +75,22 @@ public struct ExternalDisplayReference: Codable, Equatable, Hashable, Identifiab
         }
 
         return "default"
+    }
+
+    public var recoveryKey: String {
+        uuid.map { "uuid:\($0.lowercased())" } ?? brightnessPreferenceKey
+    }
+
+    // Name identities also require a unique match among the connected displays.
+    public var hasReliableIdentity: Bool {
+        uuid != nil || brightnessPreferenceKey.hasPrefix("name:")
+    }
+
+    public func matchesRecoveryIdentity(of saved: ExternalDisplayReference) -> Bool {
+        if saved.uuid != nil {
+            return uuid != nil && recoveryKey == saved.recoveryKey
+        }
+        return saved.hasReliableIdentity && brightnessPreferenceKey == saved.brightnessPreferenceKey
     }
 
     private static func normalizedDisplayName(_ value: String) -> String {

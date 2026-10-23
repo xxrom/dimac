@@ -99,7 +99,8 @@ final class CurrentBrightnessTests: XCTestCase {
     }
 
     func testUnreadableExternalRestoreRetriesWithoutRedimmingInternal() {
-        let fixture = Fixture()
+        var now = Date(timeIntervalSince1970: 1_000)
+        let fixture = Fixture(now: { now })
         defer { fixture.cleanUp() }
         fixture.external.failReads = true
         fixture.model.refreshExternalDisplays()
@@ -111,6 +112,7 @@ final class CurrentBrightnessTests: XCTestCase {
         XCTAssertEqual(fixture.internalBrightness.value, 0.7, accuracy: 0.0001)
         XCTAssertEqual(fixture.store.snapshot?.externalDisplays.first?.luminance, 43)
         fixture.external.failWrites = false
+        now.addTimeInterval(5)
         fixture.dimmer.handleUserActivity()
         XCTAssertEqual(fixture.external.value, 43)
         XCTAssertFalse(fixture.dimmer.isDimmed)
@@ -172,6 +174,39 @@ final class CurrentBrightnessTests: XCTestCase {
         XCTAssertThrowsError(try fixture.controls.set(60, for: row))
         XCTAssertEqual(fixture.external.value, 40)
     }
+
+    func testManualControlResolvesUUIDAfterSelectorAndNameChange() throws {
+        let fixture = Fixture()
+        defer { fixture.cleanUp() }
+        let uuid = "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+        fixture.external.displays[0].uuid = uuid
+        fixture.model.refreshExternalDisplays()
+        let row = try XCTUnwrap(fixture.model.displayControlRows.first)
+
+        fixture.external.displays = [
+            ExternalDisplayReference(selector: "2", name: "Renamed Monitor", uuid: uuid),
+            ExternalDisplayReference(selector: "3", name: "Monitor", uuid: "37D8832A-2D66-02CA-B9F7-8F30A301B231")
+        ]
+        try fixture.controls.set(40, for: row)
+
+        XCTAssertEqual(fixture.external.writes.last?.display.selector, "2")
+        XCTAssertEqual(fixture.external.writes.last?.display.uuid, uuid)
+        XCTAssertEqual(try fixture.controls.read(row), 40)
+    }
+
+    func testManualControlRejectsSameNameReplacementWithDifferentUUID() throws {
+        let fixture = Fixture()
+        defer { fixture.cleanUp() }
+        fixture.external.displays[0].uuid = "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+        fixture.model.refreshExternalDisplays()
+        let row = try XCTUnwrap(fixture.model.displayControlRows.first)
+        fixture.external.displays[0].uuid = "37D8832A-2D66-02CA-B9F7-8F30A301B231"
+
+        XCTAssertThrowsError(try fixture.controls.set(40, for: row))
+        XCTAssertThrowsError(try fixture.controls.read(row))
+        XCTAssertTrue(fixture.external.writes.isEmpty)
+        XCTAssertEqual(fixture.external.value, 65)
+    }
 }
 
 @MainActor
@@ -185,11 +220,11 @@ private final class Fixture {
     let dimmer: DimmerController
     let model: AppModel
 
-    init() {
+    init(now: @escaping () -> Date = Date.init) {
         let defaults = UserDefaults(suiteName: suite)!
         settings = SettingsStore(defaults: defaults)
         controls = CurrentBrightnessController(internalBrightness: internalBrightness, externalBrightness: external)
-        dimmer = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: internalBrightness, externalBrightness: external, snapshotStore: store)
+        dimmer = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: internalBrightness, externalBrightness: external, snapshotStore: store, now: now)
         model = AppModel(settings: settings, dimmer: dimmer, startAutomatically: false, brightnessControls: controls, displayProvider: {
             [ConnectedDisplayRow(id: "1", index: 0, name: "Monitor", resolution: "", brightnessPercent: nil, isBuiltIn: false, isExternal: true, canReadHardwareBrightness: false)]
         })

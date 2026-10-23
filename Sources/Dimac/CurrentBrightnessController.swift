@@ -51,9 +51,8 @@ final class CurrentBrightnessController: CurrentBrightnessManaging {
     }
 
     private func resolve(_ saved: ExternalDisplayReference) throws -> ExternalDisplayReference {
-        let key = saved.brightnessPreferenceKey
-        let matches = try externalBrightness.discoverDisplays().filter { $0.brightnessPreferenceKey == key }
-        guard key.hasPrefix("name:"), matches.count == 1, let display = matches.first else {
+        let matches = try externalBrightness.discoverDisplays().filter { $0.matchesRecoveryIdentity(of: saved) }
+        guard saved.hasReliableIdentity, matches.count == 1, let display = matches.first else {
             throw BrightnessError.readFailed(saved.name)
         }
         return display
