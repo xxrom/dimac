@@ -1,9 +1,11 @@
 import CoreGraphics
+import DimacCore
 import Foundation
 
 final class InputWakeMonitor {
     private final class Context {
         let onActivity: () -> Void
+        var tap: CFMachPort?
 
         init(onActivity: @escaping () -> Void) {
             self.onActivity = onActivity
@@ -20,7 +22,7 @@ final class InputWakeMonitor {
     }
 
     var isRunning: Bool {
-        eventTap != nil
+        eventTap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
     }
 
     @discardableResult
@@ -48,13 +50,19 @@ final class InputWakeMonitor {
             options: .listenOnly,
             eventsOfInterest: mask,
             callback: { _, type, event, userInfo in
-                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    return Unmanaged.passUnretained(event)
-                }
-
                 if let userInfo {
                     let context = Unmanaged<Context>.fromOpaque(userInfo).takeUnretainedValue()
-                    context.onActivity()
+                    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                        if let tap = context.tap { CGEvent.tapEnable(tap: tap, enable: true) }
+                        let eventType = type.rawValue
+                        let reenabled = context.tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
+                        DispatchQueue.global(qos: .utility).async {
+                            DiagnosticLogger.shared.record("input.tapDisabled", ["eventType": eventType, "idlePolling": true,
+                                "reenabled": reenabled])
+                        }
+                    } else {
+                        context.onActivity()
+                    }
                 }
 
                 return Unmanaged.passUnretained(event)
@@ -66,6 +74,7 @@ final class InputWakeMonitor {
         }
 
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        retainedContext.takeUnretainedValue().tap = tap
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
 

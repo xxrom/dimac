@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     private let externalBrightness: ExternalBrightnessManaging
     private let displayDiscovery: ConnectedDisplayDiscovery
     private let displayProvider: (() -> [ConnectedDisplayRow])?
+    private let diagnostics: DiagnosticLogger
     private lazy var internalBrightness = makeInternalBrightnessController()
     private lazy var brightnessControls: CurrentBrightnessManaging = CurrentBrightnessController(
         internalBrightness: internalBrightness, externalBrightness: externalBrightness
@@ -35,9 +36,11 @@ final class AppModel: ObservableObject {
         dimmer: DimmerController? = nil,
         startAutomatically: Bool = true,
         brightnessControls: CurrentBrightnessManaging? = nil,
-        displayProvider: (() -> [ConnectedDisplayRow])? = nil
+        displayProvider: (() -> [ConnectedDisplayRow])? = nil,
+        diagnostics: DiagnosticLogger = .shared
     ) {
         self.displayProvider = displayProvider
+        self.diagnostics = diagnostics
         let settings = settings ?? SettingsStore()
         self.settings = settings
 
@@ -56,6 +59,19 @@ final class AppModel: ObservableObject {
             self.brightnessControls = brightnessControls
         }
         if startAutomatically {
+            diagnostics.record("app.started", [
+                "executable": Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments.first ?? "unknown",
+                "bundle": Bundle.main.bundlePath,
+                "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+                "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                "diagnosticBuild": Bundle.main.object(forInfoDictionaryKey: "DimacDiagnosticBuild") as? String ?? "unlabelled",
+                "os": ProcessInfo.processInfo.operatingSystemVersionString,
+                "brightnessPath": settings.brightnessPath, "m1ddcPath": settings.m1ddcPath,
+                "logPath": diagnostics.fileURL.path,
+                "runningInstances": NSRunningApplication.runningApplications(withBundleIdentifier: "com.dimac.app").map {
+                    ["pid": $0.processIdentifier, "executable": $0.executableURL?.path ?? "unknown"] as [String: Any]
+                }
+            ])
             AppRuntime.model = self
             setUp()
         }
@@ -84,6 +100,7 @@ final class AppModel: ObservableObject {
     }
 
     func refreshExternalDisplays() {
+        diagnostics.record("app.displays.refreshStarted")
         let connectedDisplays = displayProvider?() ?? displayDiscovery.displays()
         connectedExternalDisplayRows = connectedDisplays.filter(\.isExternal)
         let ddcDisplays = dimmer.refreshExternalDisplays()
@@ -101,6 +118,7 @@ final class AppModel: ObservableObject {
         ) {
             dimmer.setStatus(status)
         }
+        diagnostics.record("app.displays.refreshed", ["rows": diagnosticRows])
     }
 
     var externalDisplaySummary: String {
@@ -123,19 +141,15 @@ final class AppModel: ObservableObject {
     }
 
     func setDimPercent(_ percent: Int) {
+        diagnostics.record("settings.allDimChanged", ["percent": percent])
         settings.setDimPercent(percent)
         for index in displayControlRows.indices {
-            let row = displayControlRows[index]
-            let preference = settings.setDisplayDimPercent(
-                percent,
-                key: row.preferenceKey,
-                displayName: row.name
-            )
-            displayControlRows[index].dimPercent = preference.dimPercent
+            displayControlRows[index].dimPercent = settings.dimPercent
         }
     }
 
     func setDisplayDimPercent(_ percent: Int, for rowID: String) {
+        diagnostics.record("settings.displayDimChanged", ["rowID": rowID, "percent": percent])
         guard let rowIndex = displayControlRows.firstIndex(where: { $0.id == rowID }) else {
             return
         }
@@ -149,17 +163,24 @@ final class AppModel: ObservableObject {
     func refreshCurrentBrightness() {
         for index in displayControlRows.indices {
             let row = displayControlRows[index]
-            displayControlRows[index].currentPercent = row.isControllable
-                ? try? brightnessControls.read(row) : nil
+            if case .ddc(let display) = row.mode {
+                displayControlRows[index].requestedPercent = dimmer.lastKnownExternalBrightness(for: display)
+            }
+            do {
+                displayControlRows[index].currentPercent = row.isControllable ? try brightnessControls.read(row) : nil
+            } catch {
+                displayControlRows[index].currentPercent = nil
+                diagnostics.record("ui.currentReadFailed", ["rowID": row.id, "error": error.localizedDescription])
+            }
         }
+        diagnostics.record("ui.brightnessRefreshed", ["rows": diagnosticRows])
     }
 
     func setCurrentBrightness(_ percent: Int, for rowID: String) {
         guard let index = displayControlRows.firstIndex(where: { $0.id == rowID }),
               displayControlRows[index].isControllable else { return }
         let row = displayControlRows[index]
-        // Finish the idle cycle first so later activity cannot undo this explicit choice,
-        // including when the chosen value equals the dim target.
+        diagnostics.record("ui.brightnessRequested", ["rowID": rowID, "requested": percent, "rowsBefore": diagnosticRows])
         if dimmer.isDimmed {
             dimmer.restoreNow(reason: "brightness adjustment")
             let hasPendingRestore: Bool
@@ -173,6 +194,7 @@ final class AppModel: ObservableObject {
                 return
             }
             guard !hasPendingRestore else {
+                diagnostics.record("ui.brightnessBlocked", ["rowID": rowID, "reason": "selected display restore pending"])
                 refreshCurrentBrightness()
                 return
             }
@@ -184,12 +206,14 @@ final class AppModel: ObservableObject {
             if case .ddc(let display) = row.mode {
                 dimmer.recordManualExternalBrightness(displayControlRows[index].currentPercent ?? percent, for: display)
             }
+            diagnostics.record("ui.brightnessWriteAccepted", ["rowID": rowID, "requested": percent, "rowsAfter": diagnosticRows])
             dimmer.setStatus(displayControlRows[index].currentPercent == nil
                 ? "Brightness sent; monitor does not report its level"
                 : "Brightness adjusted")
         } catch {
             displayControlRows[index].currentPercent = try? brightnessControls.read(row)
             dimmer.setStatus("Brightness adjustment failed", error: error.localizedDescription)
+            diagnostics.record("ui.brightnessWriteFailed", ["rowID": rowID, "requested": percent, "error": error.localizedDescription])
         }
     }
 
@@ -217,6 +241,7 @@ final class AppModel: ObservableObject {
     }
 
     func showSettingsWindow() {
+        diagnostics.record("ui.settingsOpened")
         settingsWindowController.show()
     }
 
@@ -248,6 +273,7 @@ final class AppModel: ObservableObject {
         inputWakeMonitor?.stop()
         guard EventListeningPermission.isTrusted else {
             inputWakeMonitor = nil
+            diagnostics.record("input.monitorUnavailable", ["reason": "permission not granted", "idlePolling": true])
             return
         }
 
@@ -260,8 +286,10 @@ final class AppModel: ObservableObject {
 
         if monitor.start() {
             inputWakeMonitor = monitor
+            diagnostics.record("input.monitorStarted")
         } else {
             inputWakeMonitor = nil
+            diagnostics.record("input.monitorUnavailable", ["reason": "event tap failed", "idlePolling": true])
         }
     }
 
@@ -270,15 +298,19 @@ final class AppModel: ObservableObject {
         let workspaceCenter = NSWorkspace.shared.notificationCenter
 
         observe(center.publisher(for: NSApplication.willTerminateNotification)) { model in
+            model.diagnostics.record("system.appTerminating")
             model.dimmer.restoreNow(reason: "app quit")
         }
         observe(workspaceCenter.publisher(for: NSWorkspace.willSleepNotification)) { model in
+            model.diagnostics.record("system.willSleep")
             model.dimmer.restoreNow(reason: "sleep")
         }
         observe(center.publisher(for: NSApplication.didChangeScreenParametersNotification)) { model in
+            model.diagnostics.record("system.displaysChanged")
             model.refreshExternalDisplays()
         }
         observe(workspaceCenter.publisher(for: NSWorkspace.didWakeNotification)) { model in
+            model.diagnostics.record("system.didWake")
             model.startInputWakeMonitor()
             model.dimmer.restoreNow(reason: "wake")
             model.refreshExternalDisplays()
@@ -300,7 +332,6 @@ final class AppModel: ObservableObject {
             let preference = settings.seedDisplayControl(
                 key: preferenceKey,
                 displayName: display.name,
-                currentPercent: nil,
                 defaultDimPercent: settings.dimPercent
             )
 
@@ -357,12 +388,12 @@ final class AppModel: ObservableObject {
             return .ddc(ddcDisplay)
         }
 
-        guard let index = display.index else {
+        guard display.index != nil else {
             return .unsupported
         }
 
         if display.canReadHardwareBrightness || display.isBuiltIn {
-            return .brightnessCLI(displayIndex: index)
+            return .brightnessCLI
         }
 
         return .unsupported
@@ -434,21 +465,23 @@ final class AppModel: ObservableObject {
             },
             internalBrightness: internalBrightness,
             externalBrightness: externalBrightness,
-            snapshotStore: FileSnapshotStore()
+            snapshotStore: FileSnapshotStore(diagnostics: diagnostics),
+            diagnostics: diagnostics
         )
     }
 
     private func makeInternalBrightnessController() -> InternalBrightnessManaging {
+        let settings = self.settings
         do {
             return FallbackInternalBrightnessController(
                 primary: try DisplayServicesBrightnessController(),
                 fallback: BrightnessCLIBrightnessController(
-                    executablePathProvider: { self.settings.brightnessPath }
+                    executablePathProvider: { settings.brightnessPath }
                 )
             )
         } catch {
             return BrightnessCLIBrightnessController(
-                executablePathProvider: { self.settings.brightnessPath }
+                executablePathProvider: { settings.brightnessPath }
             )
         }
     }
@@ -466,10 +499,23 @@ final class AppModel: ObservableObject {
             }
             .store(in: &cancellables)
     }
+
+    private var diagnosticRows: [[String: Any]] {
+        displayControlRows.map { row in
+            var fields: [String: Any] = [
+                "rowID": row.id, "name": row.name, "mode": row.controlDescription,
+                "isExternal": row.isExternal, "dimPercent": row.dimPercent,
+                "currentPercent": row.currentPercent as Any? ?? NSNull(),
+                "requestedPercent": row.requestedPercent as Any? ?? NSNull()
+            ]
+            if case .ddc(let display) = row.mode { fields["ddcDisplay"] = DiagnosticLogger.encoded(display) }
+            return fields
+        }
+    }
 }
 
 enum DisplayControlMode: Equatable {
-    case brightnessCLI(displayIndex: Int)
+    case brightnessCLI
     case ddc(ExternalDisplayReference)
     case unsupported
 }

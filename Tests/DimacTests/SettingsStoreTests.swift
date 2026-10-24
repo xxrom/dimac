@@ -11,7 +11,6 @@ final class SettingsStoreTests: XCTestCase {
         _ = store.seedDisplayControl(
             key: key,
             displayName: "MSI PS341WU",
-            currentPercent: 70,
             defaultDimPercent: 20
         )
         let updated = store.setDisplayDimPercent(95, key: key, displayName: "MSI PS341WU")
@@ -20,7 +19,7 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(SettingsStore(defaults: defaults).displayControlPreferences[key]?.dimPercent, 95)
     }
 
-    func testSeedingExistingDisplayKeepsDimTargetAndIgnoresLiveBrightness() {
+    func testSeedingExistingDisplayKeepsDimTargetAndRefreshesName() {
         let defaults = makeDefaults()
         let store = SettingsStore(defaults: defaults)
         let key = "display:built-in"
@@ -28,7 +27,6 @@ final class SettingsStoreTests: XCTestCase {
         _ = store.seedDisplayControl(
             key: key,
             displayName: "Built-in Retina Display",
-            currentPercent: 80,
             defaultDimPercent: 30
         )
         _ = store.setDisplayDimPercent(45, key: key, displayName: "Built-in Retina Display")
@@ -36,12 +34,29 @@ final class SettingsStoreTests: XCTestCase {
         let reseeded = store.seedDisplayControl(
             key: key,
             displayName: "Renamed display",
-            currentPercent: 10,
             defaultDimPercent: 15
         )
 
         XCTAssertEqual(reseeded.displayName, "Renamed display")
         XCTAssertEqual(reseeded.dimPercent, 45)
+    }
+
+    func testSettingDimPercentUpdatesDisconnectedDisplayPreferences() {
+        let defaults = makeDefaults()
+        let key = "display:disconnected"
+        let store = SettingsStore(defaults: defaults)
+        _ = store.seedDisplayControl(key: key, displayName: "Offline monitor", defaultDimPercent: 10)
+        _ = store.setDisplayDimPercent(35, key: key, displayName: "Offline monitor")
+
+        store.setDimPercent(20)
+
+        let reloadedStore = SettingsStore(defaults: defaults)
+        let reconnected = reloadedStore.seedDisplayControl(
+            key: key,
+            displayName: "Offline monitor",
+            defaultDimPercent: reloadedStore.dimPercent
+        )
+        XCTAssertEqual(reconnected.dimPercent, 20)
     }
 
     func testLegacyBrightPercentDoesNotCapMigratedDimPercent() throws {

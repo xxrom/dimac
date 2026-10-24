@@ -86,8 +86,6 @@ public final class DisplayServicesBrightnessController: InternalBrightnessManagi
 }
 
 public final class BrightnessCLIBrightnessController: InternalBrightnessManaging {
-    // Kept so snapshots written by older releases can still be decoded. A sentinel
-    // cannot be mapped safely to one display, so restore deliberately ignores it.
     public static let snapshotDisplayID = UInt32.max
 
     private let executablePathProvider: () -> String

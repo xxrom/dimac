@@ -1,6 +1,6 @@
 import Foundation
 
-public struct DimmerSettings: Equatable, Sendable {
+public struct DimmerSettings: Encodable, Equatable, Sendable {
     public var isEnabled: Bool
     public var idleTimeoutSeconds: Int
     public var dimPercent: Int

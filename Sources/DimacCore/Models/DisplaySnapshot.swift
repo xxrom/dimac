@@ -81,7 +81,6 @@ public struct ExternalDisplayReference: Codable, Equatable, Hashable, Identifiab
         uuid.map { "uuid:\($0.lowercased())" } ?? brightnessPreferenceKey
     }
 
-    // Name identities also require a unique match among the connected displays.
     public var hasReliableIdentity: Bool {
         uuid != nil || brightnessPreferenceKey.hasPrefix("name:")
     }

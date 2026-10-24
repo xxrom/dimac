@@ -111,12 +111,20 @@ final class SettingsStore: ObservableObject {
 
     func setDimPercent(_ value: Int) {
         dimPercent = DimmerSettings.clampedPercent(value)
+        let updatedAt = Date()
+        displayControlPreferences = displayControlPreferences.mapValues { preference in
+            Self.normalizedDisplayControlPreference(
+                id: preference.id,
+                displayName: preference.displayName,
+                dimPercent: dimPercent,
+                updatedAt: updatedAt
+            )
+        }
     }
 
     func seedDisplayControl(
         key: String,
         displayName: String,
-        currentPercent _: Int?,
         defaultDimPercent: Int
     ) -> DisplayControlPreference {
         if let preference = displayControlPreferences[key] {

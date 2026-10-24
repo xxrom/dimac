@@ -129,10 +129,11 @@ final class CurrentBrightnessTests: XCTestCase {
         restarted.restorePersistedSnapshotIfNeeded()
         XCTAssertEqual(fixture.external.value, 43)
         XCTAssertFalse(restarted.isDimmed)
-        // A completed recovery does not establish a fresh session's manual baseline.
         restarted.dimNow()
-        XCTAssertEqual(fixture.external.value, 43)
+        XCTAssertEqual(fixture.external.value, 10)
         XCTAssertEqual(fixture.internalBrightness.value, 0.1, accuracy: 0.0001)
+        restarted.handleUserActivity()
+        XCTAssertEqual(fixture.external.value, 43)
     }
 
     func testUnreadableAdjustmentDuringDimSurvivesMouseActivity() {

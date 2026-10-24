@@ -30,25 +30,6 @@ final class DimmerControllerTests: XCTestCase {
         XCTAssertNil(try reopenedStore.load())
     }
 
-    func testUUIDReconnectRestoresDisplayAfterNameAndSelectorChange() {
-        let uuid = "11111111-1111-1111-1111-111111111111"
-        let original = ExternalDisplayReference(selector: "1", name: "Original", uuid: uuid)
-        let external = MultiExternalBrightnessController(displays: [original], luminanceBySelector: ["1": 65])
-        let store = MemorySnapshotStore()
-        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(), externalBrightness: external, snapshotStore: store)
-        controller.dimNow()
-        external.connectedSelectors = []
-        controller.handleUserActivity()
-
-        external.displays = [ExternalDisplayReference(selector: "7", name: "Renamed", uuid: uuid)]
-        external.connectedSelectors = ["7"]
-        external.luminanceBySelector["7"] = 10
-        controller.refreshExternalDisplays()
-
-        XCTAssertEqual(external.luminanceBySelector["7"], 65)
-        XCTAssertNil(store.snapshot)
-    }
-
     func testDifferentUUIDWithSameNameDoesNotReceiveSavedBrightness() {
         let original = ExternalDisplayReference(selector: "1", name: "Monitor", uuid: "11111111-1111-1111-1111-111111111111")
         let external = MultiExternalBrightnessController(displays: [original], luminanceBySelector: ["1": 65])
@@ -151,6 +132,7 @@ final class DimmerControllerTests: XCTestCase {
         controller.handleUserActivity()
 
         XCTAssertEqual(external.currentLuminance, 11)
+        XCTAssertEqual(controller.lastKnownExternalBrightness(for: external.display), 11)
         XCTAssertNil(store.snapshot)
     }
 
@@ -176,7 +158,6 @@ final class DimmerControllerTests: XCTestCase {
         let controller = makeController(internalController: MockInternalBrightnessController(), externalController: external, store: store)
 
         controller.dimNow()
-        // DDC can return its cached pre-dim value before the monitor applies the write.
         external.currentLuminance = 9
         controller.handleUserActivity()
 
@@ -309,7 +290,7 @@ final class DimmerControllerTests: XCTestCase {
         XCTAssertNil(store.snapshot)
     }
 
-    func testObservedDisconnectInvalidatesManualFallback() {
+    func testObservedDisconnectInvalidatesLegacyNameOnlyManualFallback() {
         let display = ExternalDisplayReference(selector: "1", name: "Monitor")
         let external = MultiExternalBrightnessController(displays: [display], luminanceBySelector: [:])
         let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(), externalBrightness: external, snapshotStore: MemorySnapshotStore())

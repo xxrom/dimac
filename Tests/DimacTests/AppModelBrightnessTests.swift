@@ -91,7 +91,6 @@ final class AppModelBrightnessTests: XCTestCase {
         XCTAssertEqual(hardware.value, 0.45, accuracy: 0.0001)
         XCTAssertTrue(dimmer.isDimmed)
 
-        // A screen notification can arrive before its DDC connection is ready.
         external.displays = [ExternalDisplayReference(selector: "2", name: "Monitor")]
         external.failWrites = true
         model.refreshExternalDisplays()

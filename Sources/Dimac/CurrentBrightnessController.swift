@@ -6,7 +6,6 @@ protocol CurrentBrightnessManaging {
     func set(_ percent: Int, for row: DisplayControlRow) throws
 }
 
-/// Live display controls never persist a normal/restore brightness preference.
 final class CurrentBrightnessController: CurrentBrightnessManaging {
     private let internalBrightness: InternalBrightnessManaging
     private let externalBrightness: ExternalBrightnessManaging
@@ -43,7 +42,6 @@ final class CurrentBrightnessController: CurrentBrightnessManaging {
             try externalBrightness.restore([ExternalDisplaySnapshot(display: display, luminance: percent)])
         case .brightnessCLI:
             let id = try displayID(for: row)
-            // The controller resolves this ID to the current hardware index before writing.
             try internalBrightness.restore([InternalDisplaySnapshot(displayID: id, brightness: Float(percent) / 100)])
         case .unsupported:
             throw BrightnessError.writeFailed(row.name)

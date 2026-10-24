@@ -103,13 +103,15 @@ struct SettingsView: View {
                 ),
                 in: 0...100
             )
+            .accessibilityLabel("Idle timeout")
+            .accessibilityValue(settings.timeoutText)
             .padding(.leading, 26)
         }
     }
 
     private var dimLevelRow: some View {
         VStack(spacing: 7) {
-            settingRow("Dim all displays", systemImage: "sun.min") {
+            settingRow("Idle brightness · all", systemImage: "sun.min") {
                 Text("\(settings.dimPercent)%")
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -123,10 +125,11 @@ struct SettingsView: View {
                 ),
                 in: 1...100
             )
+            .accessibilityLabel("Idle brightness for all displays")
             .padding(.leading, 26)
 
             DisclosureGroup("How dimming works") {
-                Text("Restores your previous brightness when you return. Idle levels apply on the next idle cycle and never brighten a screen. Dim all displays replaces individual idle levels. If a monitor cannot report brightness, set Now once per session to enable dimming; monitor-button changes cannot be detected.")
+                Text("Current is your live brightness. Idle applies after the timeout and never brightens a display. Activity restores the previous level. The all-displays slider replaces individual idle levels. If a display cannot report brightness, set Current once per session; changes made with monitor buttons cannot be detected.")
                     .fixedSize(horizontal: false, vertical: true)
             }
             .font(.system(size: 11))
@@ -157,7 +160,7 @@ struct SettingsView: View {
             } else if model.displayControlRows.count <= 3 {
                 displayList
             } else {
-                ScrollView { displayList }
+                ScrollView { displayList.padding(.trailing, 10) }
                     .frame(height: 240)
             }
             if let error = dimmer.lastError {
@@ -189,6 +192,7 @@ struct SettingsView: View {
             .help("\(row.name) · \(row.resolution) · \(row.controlDescription)")
 
             CurrentBrightnessSlider(
+                displayName: row.name,
                 percent: row.currentPercent,
                 requestedPercent: row.requestedPercent,
                 isControllable: row.isControllable
@@ -197,14 +201,12 @@ struct SettingsView: View {
                 let updated = model.displayControlRows.first(where: { $0.id == row.id })
                 return updated?.currentPercent ?? updated?.requestedPercent
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("\(row.name) current brightness")
 
             HStack(spacing: 7) {
                 Text("Idle")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                    .frame(width: 38, alignment: .leading)
+                    .frame(width: 48, alignment: .leading)
                 Slider(value: Binding(
                     get: { Double(row.dimPercent) },
                     set: { model.setDisplayDimPercent(Int($0.rounded()), for: row.id) }
@@ -308,17 +310,16 @@ struct SettingsView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityValue(showAdvanced ? "Expanded" : "Collapsed")
 
             if showAdvanced {
                 VStack(spacing: 9) {
                     preciseTimeoutRow
 
-                    statusRow(
-                        title: "Idle",
-                        value: model.idleTimeText,
-                        systemImage: "clock",
-                        tint: .secondary
-                    )
+                    settingRow("Idle", systemImage: "clock") {
+                        Text(model.idleTimeText)
+                            .foregroundStyle(.secondary)
+                    }
 
                     launchAtLoginRow
                     hideMenuBarIconRow
@@ -430,41 +431,6 @@ struct SettingsView: View {
         }
     }
 
-    private func statusRow(
-        title: String,
-        value: String,
-        systemImage: String,
-        tint: Color
-    ) -> some View {
-        HStack(spacing: 8) {
-            statusRowContent(title: title, value: value, systemImage: systemImage, tint: tint)
-        }
-    }
-
-    private func statusRowContent(
-        title: String,
-        value: String,
-        systemImage: String,
-        tint: Color
-    ) -> some View {
-        Group {
-            Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(tint)
-                .frame(width: 18)
-                .accessibilityHidden(true)
-
-            Text(title)
-                .foregroundStyle(.primary)
-
-            Spacer(minLength: 12)
-
-            Text(value)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-    }
-
     private func warningRow(_ message: String) -> some View {
         Label {
             Text(message)
@@ -488,6 +454,7 @@ struct SettingsView: View {
 }
 
 private struct CurrentBrightnessSlider: View {
+    let displayName: String
     let percent: Int?
     let requestedPercent: Int?
     let isControllable: Bool
@@ -497,17 +464,17 @@ private struct CurrentBrightnessSlider: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            Text("Now")
+            Text("Current")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 38, alignment: .leading)
+                .frame(width: 48, alignment: .leading)
             Slider(value: $draft, in: 0...100, onEditingChanged: { editing in
                 isEditing = editing
                 if !editing {
                     draft = Double(apply(Int(draft.rounded())) ?? 0)
                 }
             })
-            .accessibilityLabel("Current brightness")
+            .accessibilityLabel("\(displayName) current brightness")
             .disabled(!isControllable)
             Text(valueLabel)
                 .font(.system(size: 11))
@@ -515,7 +482,7 @@ private struct CurrentBrightnessSlider: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 58, alignment: .trailing)
         }
-        .help("Adjust screen brightness now. Idle controls the next idle cycle.")
+        .help("Current changes brightness now. Idle applies after the timeout.")
         .onAppear { draft = Double(percent ?? requestedPercent ?? 0) }
         .onChange(of: percent) { value in
             if !isEditing { draft = Double(value ?? requestedPercent ?? 0) }

@@ -30,6 +30,36 @@ final class ExternalBrightnessControllerTests: XCTestCase {
         XCTAssertEqual(decoded.recoveryKey, connected.recoveryKey)
     }
 
+    func testCommandsUseUUIDWhenAvailableAndSelectorAsFallback() throws {
+        let uuid = "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+        let displays = [
+            ExternalDisplayReference(selector: "3", name: "Dell", uuid: uuid),
+            ExternalDisplayReference(selector: "7", name: "Legacy Dell")
+        ]
+        let runner = SuccessfulCommandRunner()
+        let diagnosticsURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dimac-ddc-test-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: diagnosticsURL) }
+        let controller = M1DDCBrightnessController(
+            executablePathProvider: { "/mock/m1ddc" },
+            commandRunner: runner,
+            diagnostics: DiagnosticLogger(fileURL: diagnosticsURL)
+        )
+
+        XCTAssertEqual(try controller.currentSnapshot(for: displays).map(\.luminance), [65, 65])
+        try controller.restore([
+            ExternalDisplaySnapshot(display: displays[0], luminance: 40),
+            ExternalDisplaySnapshot(display: displays[1], luminance: 50)
+        ])
+
+        XCTAssertEqual(runner.arguments, [
+            ["display", uuid, "get", "luminance"],
+            ["display", "7", "get", "luminance"],
+            ["display", uuid, "set", "luminance", "40"],
+            ["display", "7", "set", "luminance", "50"]
+        ])
+    }
+
     func testPartialRestoreFailureIsReportedAndOtherDisplaysAreAttempted() {
         let runner = PartialFailureRunner()
         let controller = M1DDCBrightnessController(executablePathProvider: { "/mock/m1ddc" }, commandRunner: runner)
@@ -44,6 +74,20 @@ final class ExternalBrightnessControllerTests: XCTestCase {
             ["display", "2", "set", "luminance", "70"]
         ])
     }
+
+    func testLuminanceRejectsInvalidReadingsInsteadOfClampingOrExtractingNumbers() throws {
+        let runner = SuccessfulCommandRunner()
+        let controller = M1DDCBrightnessController(executablePathProvider: { "/mock/m1ddc" }, commandRunner: runner)
+        let display = ExternalDisplayReference(selector: "1", name: "Monitor")
+        for output in ["-55\n", "101", "error 1", "70 1", "", "999999999999999999999"] {
+            runner.stdout = output
+            XCTAssertThrowsError(try controller.currentSnapshot(for: [display]))
+        }
+        for level in [0, 1, 70, 100] {
+            runner.stdout = " \(level)\n"
+            XCTAssertEqual(try controller.currentSnapshot(for: [display]).first?.luminance, level)
+        }
+    }
 }
 
 private final class PartialFailureRunner: CommandRunning {
@@ -51,5 +95,15 @@ private final class PartialFailureRunner: CommandRunning {
     func run(_ path: String, arguments: [String], timeout: TimeInterval) throws -> CommandResult {
         self.arguments.append(arguments)
         return CommandResult(status: arguments[1] == "1" ? 1 : 0, stdout: "", stderr: "Display unavailable")
+    }
+}
+
+private final class SuccessfulCommandRunner: CommandRunning {
+    var arguments: [[String]] = []
+    var stdout = "65"
+
+    func run(_ path: String, arguments: [String], timeout: TimeInterval) throws -> CommandResult {
+        self.arguments.append(arguments)
+        return CommandResult(status: 0, stdout: stdout, stderr: "")
     }
 }

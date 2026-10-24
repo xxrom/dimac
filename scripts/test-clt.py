@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""Run synchronous XCTest source scenarios with simple assertions on CLT-only Macs.
-This fallback supports assertions and teardown blocks, but not XCTest lifecycle or async tests.
-Use scripts/test.sh with full Xcode for the standard XCTest runner.
-"""
 import os
 from pathlib import Path
 import re
@@ -14,7 +10,8 @@ root = Path(__file__).resolve().parent.parent
 os.chdir(root)
 os.environ.setdefault('CLANG_MODULE_CACHE_PATH', '/tmp/dimac-clang-cache')
 os.environ.setdefault('SWIFTPM_MODULECACHE_OVERRIDE', '/tmp/dimac-swift-cache')
-subprocess.run(['swift', 'build', '--disable-sandbox'], check=True)
+sdk = os.environ.get('SDKROOT')
+subprocess.run(['swift', 'build', '--disable-sandbox', '--build-system', 'native'] + (['--sdk', sdk] if sdk else []), check=True)
 build = root / '.build/debug'
 objects = list((build / 'DimacCore.build').glob('*.swift.o')) + [p for p in (build / 'Dimac.build').glob('*.swift.o') if p.name != 'DimacApp.swift.o']
 shim = r'''
@@ -29,7 +26,9 @@ func XCTAssertEqual<T: Equatable>(_ a: T, _ b: T) { precondition(a == b, "Values
 func XCTAssertEqual<T: FloatingPoint>(_ a: T, _ b: T, accuracy: T) { precondition(abs(a-b) <= accuracy) }
 func XCTAssertNil<T>(_ v: T?) { precondition(v == nil) }
 func XCTAssertNotNil<T>(_ v: T?) { precondition(v != nil) }
-func XCTAssertThrowsError<T>(_ f: @autoclosure () throws -> T) { do { _ = try f(); preconditionFailure("Expected error") } catch {} }
+func XCTAssertLessThanOrEqual<T: Comparable>(_ a: T, _ b: T) { precondition(a <= b) }
+func XCTAssertGreaterThan<T: Comparable>(_ a: T, _ b: T) { precondition(a > b) }
+func XCTAssertThrowsError<T>(_ f: @autoclosure () throws -> T, _ handler: (Error) -> Void = { _ in }) { do { _ = try f(); preconditionFailure("Expected error") } catch { handler(error) } }
 func XCTUnwrap<T>(_ v: T?) throws -> T { guard let v else { fatalError("Expected value") }; return v }
 '''
 count = 0
@@ -47,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix='dimac-tests-') as tmp:
         swift = Path(tmp) / 'Tests.swift'
         swift.write_text(transformed + shim + '\n@main struct Run { @MainActor static func main() throws {\n' + calls + '\n} }')
         exe = Path(tmp) / 'tests'
-        subprocess.run(['swiftc', '-parse-as-library', '-I', str(build / 'Modules'), str(swift), *map(str, objects), '-o', str(exe)], check=True)
+        subprocess.run(['swiftc'] + (['-sdk', sdk] if sdk else []) + ['-parse-as-library', '-I', str(build / 'Modules'), str(swift), *map(str, objects), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
         count += len(methods)
 print(f'PASS: {count} scenarios (CLT assertion runner)')

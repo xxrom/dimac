@@ -68,15 +68,18 @@ public final class M1DDCBrightnessController: ExternalBrightnessManaging {
     private let executablePathProvider: () -> String
     private let commandRunner: CommandRunning
     private let parser: M1DDCDisplayListParser
+    private let diagnostics: DiagnosticLogger
 
     public init(
         executablePathProvider: @escaping () -> String,
         commandRunner: CommandRunning = ProcessCommandRunner(),
-        parser: M1DDCDisplayListParser = M1DDCDisplayListParser()
+        parser: M1DDCDisplayListParser = M1DDCDisplayListParser(),
+        diagnostics: DiagnosticLogger = .shared
     ) {
         self.executablePathProvider = executablePathProvider
         self.commandRunner = commandRunner
         self.parser = parser
+        self.diagnostics = diagnostics
     }
 
     public func discoverDisplays() throws -> [ExternalDisplayReference] {
@@ -89,6 +92,7 @@ public final class M1DDCBrightnessController: ExternalBrightnessManaging {
 
         if let result, result.status == 0 {
             let displays = parser.parse(result.stdout)
+            diagnostics.record("ddc.discovery", ["raw": result.stdout, "displays": DiagnosticLogger.encoded(displays)])
             if !displays.isEmpty {
                 return displays
             }
@@ -185,14 +189,19 @@ public final class M1DDCBrightnessController: ExternalBrightnessManaging {
             )
         }
 
-        guard let value = firstInteger(in: result.stdout) else {
+        guard let value = Int(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (0...100).contains(value) else {
+            diagnostics.record("ddc.readRejected", ["display": display.map { DiagnosticLogger.encoded($0) } ?? NSNull(),
+                                                    "raw": result.stdout, "reason": "expected brightness from 0 to 100"])
             throw BrightnessError.invalidOutput(
                 command: ([executablePathProvider()] + arguments).joined(separator: " "),
                 output: result.stdout
             )
         }
 
-        return min(100, max(0, value))
+        diagnostics.record("ddc.read", ["display": display.map { DiagnosticLogger.encoded($0) } ?? NSNull(),
+                                        "raw": result.stdout, "parsed": value, "percent": value])
+        return value
     }
 
     private func writeLuminance(_ value: Int, display: ExternalDisplayReference?) throws {
@@ -209,28 +218,15 @@ public final class M1DDCBrightnessController: ExternalBrightnessManaging {
                 stderr: result.stderr
             )
         }
+        diagnostics.record("ddc.writeAccepted", ["display": display.map { DiagnosticLogger.encoded($0) } ?? NSNull(),
+                                                 "requested": value, "status": result.status])
     }
 
     private func commandArguments(display: ExternalDisplayReference?, action: [String]) -> [String] {
-        guard let selector = display?.selector else {
+        guard let selector = display?.uuid ?? display?.selector else {
             return action
         }
 
         return ["display", selector] + action
-    }
-
-    private func firstInteger(in output: String) -> Int? {
-        let pattern = #"[-+]?[0-9]+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-
-        let range = NSRange(output.startIndex..<output.endIndex, in: output)
-        guard let match = regex.firstMatch(in: output, range: range),
-              let valueRange = Range(match.range, in: output) else {
-            return nil
-        }
-
-        return Int(output[valueRange])
     }
 }
