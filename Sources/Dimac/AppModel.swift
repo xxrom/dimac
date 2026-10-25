@@ -99,11 +99,16 @@ final class AppModel: ObservableObject {
         dimmer.restoreNow(reason: "manual")
     }
 
-    func refreshExternalDisplays() {
-        diagnostics.record("app.displays.refreshStarted")
+    /// - Parameter recoveryReason: set for system display events (reconnect, wake) so the saved normal
+    ///   brightness is re-sent once the monitor is ready; `nil` for plain UI refreshes.
+    func refreshExternalDisplays(recoveryReason: String? = nil) {
+        diagnostics.record("app.displays.refreshStarted", ["recoveryReason": recoveryReason as Any? ?? NSNull()])
         let connectedDisplays = displayProvider?() ?? displayDiscovery.displays()
         connectedExternalDisplayRows = connectedDisplays.filter(\.isExternal)
         let ddcDisplays = dimmer.refreshExternalDisplays()
+        if let recoveryReason, !ddcDisplays.isEmpty {
+            dimmer.scheduleExternalBrightnessRecovery(reason: recoveryReason, displays: ddcDisplays)
+        }
 
         syncDisplayControlRows(
             from: connectedDisplays,
@@ -167,7 +172,12 @@ final class AppModel: ObservableObject {
                 displayControlRows[index].requestedPercent = dimmer.lastKnownExternalBrightness(for: display)
             }
             do {
-                displayControlRows[index].currentPercent = row.isControllable ? try brightnessControls.read(row) : nil
+                let current = row.isControllable ? try brightnessControls.read(row) : nil
+                displayControlRows[index].currentPercent = current
+                if case .ddc(let display) = row.mode, let current {
+                    dimmer.observeExternalBrightnessReading(current, for: display)
+                    displayControlRows[index].requestedPercent = dimmer.lastKnownExternalBrightness(for: display)
+                }
             } catch {
                 displayControlRows[index].currentPercent = nil
                 diagnostics.record("ui.currentReadFailed", ["rowID": row.id, "error": error.localizedDescription])
@@ -204,7 +214,9 @@ final class AppModel: ObservableObject {
             displayControlRows[index].requestedPercent = min(100, max(0, percent))
             displayControlRows[index].currentPercent = try? brightnessControls.read(row)
             if case .ddc(let display) = row.mode {
-                dimmer.recordManualExternalBrightness(displayControlRows[index].currentPercent ?? percent, for: display)
+                // A zero readback is what unresponsive DDC monitors report; keep the requested level instead.
+                let readback = displayControlRows[index].currentPercent.flatMap { $0 > 0 ? $0 : nil }
+                dimmer.recordManualExternalBrightness(readback ?? percent, for: display)
             }
             diagnostics.record("ui.brightnessWriteAccepted", ["rowID": rowID, "requested": percent, "rowsAfter": diagnosticRows])
             dimmer.setStatus(displayControlRows[index].currentPercent == nil
@@ -307,13 +319,20 @@ final class AppModel: ObservableObject {
         }
         observe(center.publisher(for: NSApplication.didChangeScreenParametersNotification)) { model in
             model.diagnostics.record("system.displaysChanged")
-            model.refreshExternalDisplays()
+            model.refreshExternalDisplays(recoveryReason: "displays changed")
+        }
+        observe(workspaceCenter.publisher(for: NSWorkspace.screensDidSleepNotification)) { model in
+            model.diagnostics.record("system.screensDidSleep")
+        }
+        observe(workspaceCenter.publisher(for: NSWorkspace.screensDidWakeNotification)) { model in
+            model.diagnostics.record("system.screensDidWake")
+            model.refreshExternalDisplays(recoveryReason: "screens wake")
         }
         observe(workspaceCenter.publisher(for: NSWorkspace.didWakeNotification)) { model in
             model.diagnostics.record("system.didWake")
             model.startInputWakeMonitor()
             model.dimmer.restoreNow(reason: "wake")
-            model.refreshExternalDisplays()
+            model.refreshExternalDisplays(recoveryReason: "wake")
         }
     }
 
@@ -466,7 +485,8 @@ final class AppModel: ObservableObject {
             internalBrightness: internalBrightness,
             externalBrightness: externalBrightness,
             snapshotStore: FileSnapshotStore(diagnostics: diagnostics),
-            diagnostics: diagnostics
+            diagnostics: diagnostics,
+            levelStore: UserDefaultsExternalLevelStore(defaults: settings.defaults)
         )
     }
 

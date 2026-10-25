@@ -643,6 +643,92 @@ final class DimmerControllerTests: XCTestCase {
         XCTAssertNil(store.snapshot)
     }
 
+    func testReconnectedMonitorReceivesSavedLevelOnceItIsReadyAndVerified() {
+        let uuid = "11111111-1111-1111-1111-111111111111"
+        let display = ExternalDisplayReference(selector: "2", name: "MSI PS341WU", uuid: uuid)
+        let external = MultiExternalBrightnessController(displays: [display], luminanceBySelector: ["2": 60])
+        let scheduler = ManualScheduler()
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(),
+            externalBrightness: external, snapshotStore: MemorySnapshotStore(), levelStore: MemoryLevelStore(), scheduler: scheduler.schedule)
+        controller.refreshExternalDisplays()
+        controller.recordManualExternalBrightness(70, for: display)
+        scheduler.runAll()
+
+        external.connectedSelectors = []
+        controller.refreshExternalDisplays()
+        external.connectedSelectors = ["2"]
+        external.luminanceBySelector["2"] = 0
+        external.ignoredWrites = 1
+        controller.refreshExternalDisplays()
+        XCTAssertEqual(external.luminanceBySelector["2"], 0)
+
+        scheduler.runNext()
+        XCTAssertEqual(external.luminanceBySelector["2"], 0)
+        scheduler.runNext()
+        XCTAssertEqual(external.luminanceBySelector["2"], 70)
+        XCTAssertTrue(scheduler.pending.isEmpty)
+        XCTAssertEqual(controller.lastKnownExternalBrightness(for: display), 70)
+    }
+
+    func testZeroReadingIsNeverCapturedAsNormalBrightness() {
+        let display = ExternalDisplayReference(selector: "2", name: "Monitor", uuid: "11111111-1111-1111-1111-111111111111")
+        let external = MultiExternalBrightnessController(displays: [display], luminanceBySelector: ["2": 0])
+        let store = MemorySnapshotStore()
+        var now = Date(timeIntervalSince1970: 1_000)
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(),
+            externalBrightness: external, snapshotStore: store, now: { now }, scheduler: { _, _ in })
+        controller.dimNow()
+        XCTAssertTrue(external.restoreSelectors.isEmpty)
+        controller.handleUserActivity()
+
+        controller.recordManualExternalBrightness(70, for: display)
+        external.luminanceBySelector["2"] = 0
+        now = now.addingTimeInterval(10)
+        controller.dimNow()
+        XCTAssertEqual(store.snapshot?.externalDisplays.first?.luminance, 70)
+        controller.handleUserActivity()
+        XCTAssertEqual(external.luminanceBySelector["2"], 70)
+    }
+
+    func testSavedLevelSurvivesRestartAndIsSentWhenDisplayIsFirstDiscovered() {
+        let display = ExternalDisplayReference(selector: "2", name: "Monitor", uuid: "11111111-1111-1111-1111-111111111111")
+        let external = MultiExternalBrightnessController(displays: [display], luminanceBySelector: ["2": 55])
+        let levels = MemoryLevelStore()
+        let first = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(),
+            externalBrightness: external, snapshotStore: MemorySnapshotStore(), levelStore: levels, scheduler: { _, _ in })
+        first.recordManualExternalBrightness(42, for: display)
+        XCTAssertEqual(levels.levels, ["uuid:11111111-1111-1111-1111-111111111111": 42])
+
+        let scheduler = ManualScheduler()
+        external.luminanceBySelector["2"] = 100
+        let restarted = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(),
+            externalBrightness: external, snapshotStore: MemorySnapshotStore(), levelStore: levels, scheduler: scheduler.schedule)
+        restarted.refreshExternalDisplays()
+        restarted.observeExternalBrightnessReading(100, for: display)
+        scheduler.runAll()
+        XCTAssertEqual(external.luminanceBySelector["2"], 42)
+        XCTAssertEqual(levels.levels["uuid:11111111-1111-1111-1111-111111111111"], 42)
+    }
+
+    func testMonitorThatWakesAtDefaultWhileDimmedIsRestoredToSavedLevel() {
+        let display = ExternalDisplayReference(selector: "2", name: "Monitor", uuid: "11111111-1111-1111-1111-111111111111")
+        let external = MultiExternalBrightnessController(displays: [display], luminanceBySelector: ["2": 65])
+        let scheduler = ManualScheduler()
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(),
+            externalBrightness: external, snapshotStore: MemorySnapshotStore(), scheduler: scheduler.schedule)
+        controller.dimNow()
+        XCTAssertEqual(external.luminanceBySelector["2"], 10)
+
+        external.luminanceBySelector["2"] = 50
+        controller.scheduleExternalBrightnessRecovery(reason: "screens wake")
+        XCTAssertTrue(scheduler.pending.isEmpty)
+        controller.handleUserActivity()
+        XCTAssertEqual(external.luminanceBySelector["2"], 65)
+        XCTAssertEqual(controller.lastKnownExternalBrightness(for: display), 65)
+        scheduler.runAll()
+        XCTAssertEqual(external.luminanceBySelector["2"], 65)
+    }
+
     private func makeController(
         internalController: MockInternalBrightnessController,
         externalController: MockExternalBrightnessController,
@@ -730,6 +816,7 @@ private final class MultiExternalBrightnessController: ExternalBrightnessManagin
     var connectedSelectors: Set<String>
     var luminanceBySelector: [String: Int]
     var restoreSelectors: [String] = []
+    var ignoredWrites = 0
 
     init(displays: [ExternalDisplayReference], luminanceBySelector: [String: Int]) {
         self.displays = displays
@@ -765,6 +852,10 @@ private final class MultiExternalBrightnessController: ExternalBrightnessManagin
                 throw TestError.failed
             }
             restoreSelectors.append(selector)
+            if ignoredWrites > 0 {
+                ignoredWrites -= 1
+                continue
+            }
             luminanceBySelector[selector] = snapshot.luminance
         }
     }
@@ -783,5 +874,35 @@ private final class MemorySnapshotStore: SnapshotPersisting {
 
     func clear() throws {
         snapshot = nil
+    }
+}
+
+private final class MemoryLevelStore: ExternalLevelPersisting {
+    var levels: [String: Int] = [:]
+
+    func loadLevels() -> [String: Int] {
+        levels
+    }
+
+    func saveLevels(_ levels: [String: Int]) {
+        self.levels = levels
+    }
+}
+
+@MainActor
+private final class ManualScheduler {
+    var pending: [@MainActor () -> Void] = []
+
+    func schedule(_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) {
+        pending.append(work)
+    }
+
+    func runNext() {
+        guard !pending.isEmpty else { return }
+        pending.removeFirst()()
+    }
+
+    func runAll() {
+        while !pending.isEmpty { runNext() }
     }
 }

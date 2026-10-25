@@ -50,7 +50,7 @@ final class SettingsStore: ObservableObject {
         didSet { saveDisplayControlPreferences() }
     }
 
-    private let defaults: UserDefaults
+    let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults

@@ -20,12 +20,13 @@ final class DiagnosticCycleTests: XCTestCase {
         XCTAssertTrue(result.events.contains { $0["event"] as? String == "ddc.readRejected" && $0["raw"] as? String == "-55\n" })
     }
 
-    func testFullCycleTraceExposesStaleOneReadAfterSuccessfulSeventyRestore() throws {
+    func testStaleReadAfterReconnectDoesNotReplaceSavedSeventyBaseline() throws {
         let result = try emulate(staleAfterReconnect: true)
-        XCTAssertEqual(result.restoreLevels, [70, 1])
+        XCTAssertEqual(result.restoreLevels, [70, 70])
         let captures = result.events.filter { $0["event"] as? String == "dim.external.captured" }
         let readings = captures.compactMap { ($0["reading"] as? [String: Any])?["luminance"] as? Int }
-        XCTAssertEqual(readings, [70, 1])
+        XCTAssertEqual(readings, [70])
+        XCTAssertTrue(captures.contains { $0["source"] as? String == "saved level" && $0["percent"] as? Int == 70 })
         let reads = result.events.filter { $0["event"] as? String == "ddc.read" }
         XCTAssertTrue(reads.contains { $0["raw"] as? String == "1\n" && $0["percent"] as? Int == 1 })
         XCTAssertTrue(result.events.contains { $0["event"] as? String == "ui.brightnessWriteAccepted" && $0["requested"] as? Int == 70 })
