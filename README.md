@@ -19,7 +19,7 @@ Dimac is a macOS menu bar app for Apple Silicon MacBooks that lowers internal an
 
 If an external monitor is unplugged while dimmed, Dimac keeps its previous brightness in the recovery snapshot, including across app restarts. After activity resumes, reconnecting that monitor retries its restoration automatically; temporary command failures also retry every five seconds. Other displays can continue their normal dim/wake cycles while recovery is pending. Recovery uses the monitor UUID reported by `m1ddc` when available, otherwise a unique display name; ambiguous matches remain pending rather than changing another monitor.
 
-Set the timeout and dim level to get started. Each display has its own idle level. Changes apply on the next idle cycle. Use its “Current” slider to adjust a screen’s current brightness from Dimac. It reads the live value and applies your choice when you release the slider. “Idle” sets the next idle target; current brightness is never saved as a restore preference. If a monitor cannot report brightness, manual adjustment remains available and “Set N%” shows its last known normal level. A successful manual setting enables idle dimming for that monitor during this app session, using that level for restoration when reading is unavailable. UUID-identified monitors retain this level across disconnects, and restoring a recovery snapshot reestablishes it even after an app restart. A restart without a recovery snapshot requires setting it again. Invalid helper readings are rejected. Changes through monitor buttons cannot be detected without readable brightness.
+Set the timeout and dim level to get started. Each display has its own idle level. Changes apply on the next idle cycle. Use its “Now” slider to adjust a screen’s current brightness from Dimac. It reads the live value and applies your choice when you release the slider. “Idle” sets the next idle target; current brightness is never saved as a restore preference. If a monitor cannot report brightness, manual adjustment remains available and “Set N%” shows its last known normal level. A successful manual setting enables idle dimming for that monitor during this app session, using that level for restoration when reading is unavailable. UUID-identified monitors retain this level across disconnects, and restoring a recovery snapshot reestablishes it even after an app restart. A restart without a recovery snapshot requires setting it again. Invalid helper readings are rejected. Changes through monitor buttons cannot be detected without readable brightness.
 
 ## Requirements
 
@@ -29,7 +29,18 @@ Set the timeout and dim level to get started. Each display has its own idle leve
 
 Dimac does not bundle either helper. It looks for executables on disk and lets you override both paths in `Advanced` settings.
 
-## Quick Start
+## Download
+
+1. Download `Dimac-<version>-macOS-arm64.zip` from the [latest release](https://github.com/xxrom/dimac/releases/latest) (Apple Silicon only) and unzip it.
+2. Move `Dimac.app` to `/Applications`.
+3. Install the helper tools (see step 1 of Quick Start below).
+4. The app is ad-hoc signed, not notarized, so macOS blocks the first launch. Either right-click `Dimac.app` → **Open** → **Open**, or run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Dimac.app
+```
+
+## Quick Start (build from source)
 
 1. Install the helper tools:
 
