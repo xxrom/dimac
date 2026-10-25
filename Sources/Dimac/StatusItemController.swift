@@ -126,6 +126,15 @@ final class StatusItemController: NSObject {
 }
 
 extension StatusItemController: NSPopoverDelegate {
+    func popoverDidShow(_ notification: Notification) {
+        // Resize instantly when Advanced opens or closes; keep the open/close fade.
+        popover?.animates = false
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        popover?.animates = true
+    }
+
     func popoverDidClose(_ notification: Notification) {
         stopMonitoringOutsideEvents()
         popover = nil

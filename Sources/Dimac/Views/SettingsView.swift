@@ -22,7 +22,6 @@ struct SettingsView: View {
                 advancedToggle
                 if showAdvanced {
                     advancedCards
-                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 footer
             }
@@ -35,7 +34,7 @@ struct SettingsView: View {
         .background(.ultraThinMaterial)
         .onAppear {
             timeoutInput = settings.timeoutText
-            model.refreshCurrentBrightness()
+            model.refreshExternalDisplays()
         }
         .onChange(of: dimmer.isDimmed) { _ in
             model.refreshCurrentBrightness()
@@ -137,7 +136,7 @@ struct SettingsView: View {
     private var displayControls: some View {
         if model.displayControlRows.isEmpty {
             card(title: "Displays", tint: .gray) {
-                Text("No displays found. Try refreshing.")
+                Text("No displays found.")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
             }
@@ -194,14 +193,13 @@ struct SettingsView: View {
 
     private var advancedToggle: some View {
         Button {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                showAdvanced.toggle()
-            }
+            showAdvanced.toggle()
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .bold))
                     .rotationEffect(.degrees(showAdvanced ? 90 : 0))
+                    .animation(nil, value: showAdvanced)
                     .frame(width: 14)
                 Text("Advanced")
                     .font(.system(size: 12, weight: .medium))
@@ -333,15 +331,6 @@ struct SettingsView: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            Button {
-                model.refreshExternalDisplays()
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-                    .frame(maxWidth: .infinity)
-            }
-            .keyboardShortcut("r")
-            .help("Refresh displays and brightness (⌘R)")
-
             Button {
                 NSApplication.shared.terminate(nil)
             } label: {
