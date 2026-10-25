@@ -108,15 +108,17 @@ final class StatusItemController: NSObject {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.delegate = self
-        popover.contentSize = NSSize(width: 330, height: 520)
+        popover.contentSize = NSSize(width: 340, height: 480)
 
         if let model {
-            popover.contentViewController = NSHostingController(
+            let controller = NSHostingController(
                 rootView: SettingsView()
                     .environmentObject(model)
                     .environmentObject(model.dimmer)
                     .environmentObject(model.settings)
             )
+            controller.sizingOptions = .preferredContentSize
+            popover.contentViewController = controller
         }
 
         return popover
