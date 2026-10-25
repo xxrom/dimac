@@ -5,8 +5,8 @@ Dimac is a macOS menu bar app for Apple Silicon MacBooks that lowers internal an
 ## Screenshots
 
 <p align="center">
-  <img src=".github/assets/dimac-overview.png" alt="Dimac popup with per-display brightness cards" width="383" />
-  <img src=".github/assets/dimac-advanced.png" alt="Dimac popup with Advanced settings expanded" width="370" />
+  <img src=".github/assets/dimac-0.1.2-overview.png" alt="Dimac popup with per-display brightness cards" width="383" />
+  <img src=".github/assets/dimac-0.1.2-advanced.png" alt="Dimac popup with Advanced settings expanded" width="370" />
 </p>
 
 ## What It Does
