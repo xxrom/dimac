@@ -9,12 +9,16 @@
 
 ## Release Checklist
 
-1. Run `swift build`.
-2. Run `zsh ./scripts/test.sh`.
-3. Build the app bundle with `zsh ./scripts/build-app.sh`.
-4. Smoke-test built-in dim/restore with `brightness` installed.
-5. Smoke-test external display control with `m1ddc` installed, if you claim external support in the release notes.
-6. If Input Monitoring is already granted on the test machine, verify the optional faster wake path still behaves correctly.
-7. Update [CHANGELOG.md](CHANGELOG.md).
-8. Tag the release and attach the built `.app` if you distribute binaries.
-9. If you plan a public binary release, sign and notarize the artifact with your real Apple Developer identity.
+Releases are published by [`.github/workflows/release.yml`](.github/workflows/release.yml) when a `vX.Y.Z` tag is pushed. It checks the tag matches `Info.plist`, runs the tests, builds the app, and publishes `Dimac-X.Y.Z-macOS-arm64.zip` with notes taken from `CHANGELOG.md` and its SHA-256.
+
+1. Add your changes under `## Unreleased` in [CHANGELOG.md](CHANGELOG.md) as you go.
+2. Smoke-test dim/restore locally (`zsh ./scripts/build-app.sh`), including external displays with `m1ddc` if the release touches them.
+3. On a clean `master`, run:
+
+   ```sh
+   zsh ./scripts/release.sh patch --push   # or minor, major, or an explicit X.Y.Z
+   ```
+
+   This bumps `CFBundleShortVersionString` and `CFBundleVersion`, moves the Unreleased notes under the new version, commits `Release X.Y.Z`, tags `vX.Y.Z`, and pushes both. Leave off `--push` to review first.
+4. Watch the Release workflow in the Actions tab. If it fails, fix on `master`, delete the tag (`git push --delete origin vX.Y.Z && git tag -d vX.Y.Z`), and release the next patch version instead of reusing the tag.
+5. If you plan a signed public binary release, sign and notarize the artifact with your real Apple Developer identity.

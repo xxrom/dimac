@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check tag matches app version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          plist_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Dimac/Resources/Info.plist)"
+          if [[ "$version" != "$plist_version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Info.plist version $plist_version. Use scripts/release.sh."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Run tests
+        run: zsh ./scripts/test.sh
+
+      - name: Build app bundle
+        run: zsh ./scripts/build-app.sh release
+
+      - name: Package and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          zip="Dimac-$VERSION-macOS-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent .build/release/Dimac.app "$zip"
+          sha="$(shasum -a 256 "$zip" | cut -d ' ' -f 1)"
+
+          {
+            echo "## Dimac $VERSION"
+            echo
+            echo "### What's new"
+            awk -v heading="## $VERSION " 'index($0, heading) == 1 { inside = 1; next } /^## / { inside = 0 } inside' CHANGELOG.md
+            echo
+            echo "### Install"
+            echo "1. Download \`$zip\` (Apple Silicon, macOS 13+), unzip, move \`Dimac.app\` to \`/Applications\`."
+            echo "2. Install helpers: \`brew install m1ddc\` and [\`brightness\`](https://github.com/nriley/brightness)."
+            echo "3. The app is ad-hoc signed (not notarized). On first launch right-click → **Open**, or run:"
+            echo "   \`xattr -dr com.apple.quarantine /Applications/Dimac.app\`"
+            echo
+            echo "SHA-256: \`$sha\`"
+          } > release-notes.md
+
+          gh release create "$GITHUB_REF_NAME" "$zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Dimac $VERSION" \
+            --notes-file release-notes.md \
+            --verify-tag
