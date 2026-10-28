@@ -2,8 +2,13 @@ import Foundation
 import Darwin
 
 public final class DiagnosticLogger {
-    public static let shared = DiagnosticLogger(fileURL: FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/Dimac/diagnostics.jsonl"))
+    /// UserDefaults key for the opt-in Advanced setting; logging is off unless the user turns it on.
+    public static let enabledDefaultsKey = "diagnosticLoggingEnabled"
+    public static let shared = DiagnosticLogger(
+        fileURL: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Dimac/diagnostics.jsonl"),
+        isEnabled: UserDefaults.standard.bool(forKey: enabledDefaultsKey)
+    )
 
     private static let minimumFileSize = 1_024
     private static let truncationReason = "record exceeded the configured maximum log size"
@@ -12,16 +17,52 @@ public final class DiagnosticLogger {
     private let maximumFileSize: Int
     private let now: () -> Date
     private let maximumAge: TimeInterval = 5 * 60 * 60
+    /// Pruning rereads every log file, so it runs at most this often; records may outlive the cutoff by this much.
+    private let pruneInterval: TimeInterval = 10 * 60
+    private let formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
     private let session = UUID().uuidString
     private let lock = NSLock()
     private var sequence = 0
     private var reportedFailure = false
     private var nextExpiration = Date.distantPast
+    private var enabled: Bool
 
-    public init(fileURL: URL, maximumFileSize: Int = 5_000_000, now: @escaping () -> Date = Date.init) {
+    public init(fileURL: URL, maximumFileSize: Int = 5_000_000, isEnabled: Bool = true,
+                now: @escaping () -> Date = Date.init) {
         self.fileURL = fileURL
         self.maximumFileSize = max(Self.minimumFileSize, maximumFileSize)
+        self.enabled = isEnabled
         self.now = now
+    }
+
+    /// When false, `record` returns before building fields or touching the file system.
+    public var isEnabled: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return enabled
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            enabled = newValue
+            nextExpiration = .distantPast
+        }
+    }
+
+    /// Removes the current and rotated log files and the lock file.
+    public func deleteLogFiles() {
+        lock.lock()
+        defer { lock.unlock() }
+        let lockURL = fileURL.deletingLastPathComponent().appendingPathComponent(".\(fileURL.lastPathComponent).lock")
+        for url in [fileURL, fileURL.appendingPathExtension("1"), fileURL.appendingPathExtension("2"), lockURL] {
+            try? FileManager.default.removeItem(at: url)
+        }
+        nextExpiration = .distantPast
     }
 
     public static func encoded<T: Encodable>(_ value: T) -> Any {
@@ -34,11 +75,13 @@ public final class DiagnosticLogger {
         return json
     }
 
-    public func record(_ event: String, _ fields: [String: Any] = [:]) {
+    public func record(_ event: String, _ fields: @autoclosure () -> [String: Any] = [:]) {
+        guard isEnabled else { return }
+        var entry = fields()
         lock.lock()
         defer { lock.unlock() }
+        guard enabled else { return }
         sequence += 1
-        var entry = fields
         entry["event"] = event
         entry["session"] = session
         entry["sequence"] = sequence
@@ -54,12 +97,10 @@ public final class DiagnosticLogger {
                 _ = Darwin.close(lockDescriptor)
             }
 
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             let date = now()
             entry["timestamp"] = formatter.string(from: date)
             if date >= nextExpiration {
-                try removeExpiredRecords(at: date, formatter: formatter)
+                try removeExpiredRecords(at: date)
             }
             let data = try encodedLine(for: entry)
             let size = (try? manager.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.intValue ?? 0
@@ -125,7 +166,7 @@ public final class DiagnosticLogger {
         return line
     }
 
-    private func removeExpiredRecords(at date: Date, formatter: ISO8601DateFormatter) throws {
+    private func removeExpiredRecords(at date: Date) throws {
         let manager = FileManager.default
         let cutoff = date.addingTimeInterval(-maximumAge)
         var earliestExpiration = Date.distantFuture
@@ -149,6 +190,6 @@ public final class DiagnosticLogger {
                 try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
             }
         }
-        nextExpiration = earliestExpiration
+        nextExpiration = max(earliestExpiration, date.addingTimeInterval(pruneInterval))
     }
 }

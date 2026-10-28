@@ -5,6 +5,7 @@ import SwiftUI
 final class SettingsWindowController {
     private weak var model: AppModel?
     private var window: NSWindow?
+    private var closeObserver: NSObjectProtocol?
 
     init(model: AppModel) {
         self.model = model
@@ -38,6 +39,17 @@ final class SettingsWindowController {
         window.makeKeyAndOrderFront(nil)
 
         self.window = window
+        // Drop the window on close so its SettingsView stops observing the model while hidden.
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if let closeObserver = self.closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+                self.closeObserver = nil
+                self.window = nil
+            }
+        }
         NSApp.activate(ignoringOtherApps: true)
     }
 }

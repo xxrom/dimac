@@ -34,7 +34,11 @@ struct SettingsView: View {
         .background(.ultraThinMaterial)
         .onAppear {
             timeoutInput = settings.timeoutText
+            model.settingsViewDidAppear()
             model.refreshExternalDisplays()
+        }
+        .onDisappear {
+            model.settingsViewDidDisappear()
         }
         .onChange(of: dimmer.isDimmed) { _ in
             model.refreshCurrentBrightness()
@@ -293,13 +297,22 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                         .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
                 }
-                row("Diagnostics log") {
-                    Button("Show in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([DiagnosticLogger.shared.fileURL])
+                row("Diagnostic logging") {
+                    if settings.diagnosticLoggingEnabled {
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([DiagnosticLogger.shared.fileURL])
+                        }
+                        .buttonStyle(.borderless)
+                        .help(DiagnosticLogger.shared.fileURL.path)
                     }
-                    .buttonStyle(.borderless)
-                    .help(DiagnosticLogger.shared.fileURL.path)
+                    Toggle("Diagnostic logging", isOn: Binding(
+                        get: { settings.diagnosticLoggingEnabled },
+                        set: { model.setDiagnosticLogging($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
                 }
+                .help("Off by default. Turn on to record a log while reproducing a bug; turning it off deletes the log.")
                 row("Version") {
                     Text(appVersionText)
                         .foregroundStyle(.secondary)

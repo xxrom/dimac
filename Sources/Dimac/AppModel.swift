@@ -29,6 +29,8 @@ final class AppModel: ObservableObject {
     private lazy var settingsWindowController = SettingsWindowController(model: self)
     private var inputWakeMonitor: InputWakeMonitor?
     private var idleTimer: Timer?
+    private var visibleSettingsViews = 0
+    private static let maximumIdleCheckInterval: TimeInterval = 60
     private var cancellables = Set<AnyCancellable>()
 
     init(
@@ -59,6 +61,7 @@ final class AppModel: ObservableObject {
             self.brightnessControls = brightnessControls
         }
         if startAutomatically {
+            diagnostics.isEnabled = settings.diagnosticLoggingEnabled
             diagnostics.record("app.started", [
                 "executable": Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments.first ?? "unknown",
                 "bundle": Bundle.main.bundlePath,
@@ -242,6 +245,19 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Turning logging off also deletes existing logs, so nothing is kept once an issue is resolved.
+    func setDiagnosticLogging(_ enabled: Bool) {
+        settings.diagnosticLoggingEnabled = enabled
+        if enabled {
+            diagnostics.isEnabled = true
+            diagnostics.record("diagnostics.enabled", ["logPath": diagnostics.fileURL.path])
+            refreshExternalDisplays()
+        } else {
+            diagnostics.isEnabled = false
+            diagnostics.deleteLogFiles()
+        }
+    }
+
     func setHideMenuBarIcon(_ hidden: Bool) {
         settings.hideMenuBarIcon = hidden
 
@@ -267,18 +283,44 @@ final class AppModel: ObservableObject {
 
     private func startIdleTimer() {
         idleTimer?.invalidate()
+        checkIdleTime()
+    }
 
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                let idleTime = self.idleReader.idleTime()
-                self.idleTimeText = Self.formatIdleTime(idleTime)
-                self.dimmer.handleIdleTime(idleTime)
-            }
+    /// Polls every second only while dimmed, retrying, or showing the UI; otherwise sleeps until the
+    /// timeout could next elapse, since idle time cannot grow faster than the wall clock.
+    private func checkIdleTime() {
+        let idleTime = idleReader.idleTime()
+        if visibleSettingsViews > 0 {
+            let text = Self.formatIdleTime(idleTime)
+            if text != idleTimeText { idleTimeText = text }
         }
+        dimmer.handleIdleTime(idleTime)
 
+        var interval: TimeInterval = 1
+        if visibleSettingsViews == 0, !dimmer.needsFrequentIdleChecks {
+            let remaining = settings.isEnabled ? TimeInterval(settings.idleTimeoutSeconds) - idleTime : .infinity
+            interval = min(max(remaining, 1), Self.maximumIdleCheckInterval)
+        }
+        scheduleIdleCheck(after: interval)
+    }
+
+    private func scheduleIdleCheck(after interval: TimeInterval) {
+        idleTimer?.invalidate()
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.checkIdleTime() }
+        }
+        timer.tolerance = min(interval * 0.1, 1)
         RunLoop.main.add(timer, forMode: .common)
         idleTimer = timer
+    }
+
+    func settingsViewDidAppear() {
+        visibleSettingsViews += 1
+        startIdleTimer()
+    }
+
+    func settingsViewDidDisappear() {
+        visibleSettingsViews = max(0, visibleSettingsViews - 1)
     }
 
     private func startInputWakeMonitor() {
@@ -289,10 +331,13 @@ final class AppModel: ObservableObject {
             return
         }
 
+        // The tap's run loop source is on the main run loop, so this runs on the main actor; skipping the
+        // Task hop matters because mouse moves arrive at display refresh rate.
         let monitor = InputWakeMonitor { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
+            MainActor.assumeIsolated {
+                guard let self, self.dimmer.isDimmed else { return }
                 self.dimmer.handleUserActivity()
+                self.startIdleTimer()
             }
         }
 

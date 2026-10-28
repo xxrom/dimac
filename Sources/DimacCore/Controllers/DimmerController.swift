@@ -115,6 +115,11 @@ public final class DimmerController: ObservableObject {
         trace("dimmer.initialized")
     }
 
+    /// True while restore detection or a pending retry depends on frequent idle samples.
+    public var needsFrequentIdleChecks: Bool {
+        isDimmed || restoreRequested
+    }
+
     public func handleIdleTime(_ idleTime: TimeInterval, applyHardware: Bool = true) {
         let settings = settingsProvider()
         if now().timeIntervalSince(lastIdleLogAt) >= 10 || (idleTime < 1 && isDimmed && !restoreRequested) {
@@ -765,8 +770,9 @@ public final class DimmerController: ObservableObject {
         trace("error", ["message": message])
     }
 
-    private func trace(_ event: String, _ fields: [String: Any] = [:]) {
-        var entry = fields
+    private func trace(_ event: String, _ fields: @autoclosure () -> [String: Any] = [:]) {
+        guard diagnostics.isEnabled else { return }
+        var entry = fields()
         entry["isDimmed"] = isDimmed
         entry["restoreRequested"] = restoreRequested
         entry["activeSnapshot"] = activeSnapshot.map { DiagnosticLogger.encoded($0) } ?? NSNull()

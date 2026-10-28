@@ -46,6 +46,10 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(hideMenuBarIcon, forKey: Keys.hideMenuBarIcon) }
     }
 
+    @Published var diagnosticLoggingEnabled: Bool {
+        didSet { defaults.set(diagnosticLoggingEnabled, forKey: Keys.diagnosticLoggingEnabled) }
+    }
+
     @Published private(set) var displayControlPreferences: [String: DisplayControlPreference] {
         didSet { saveDisplayControlPreferences() }
     }
@@ -80,6 +84,7 @@ final class SettingsStore: ObservableObject {
 
         self.launchAtLogin = defaults.bool(forKey: Keys.launchAtLogin)
         self.hideMenuBarIcon = defaults.bool(forKey: Keys.hideMenuBarIcon)
+        self.diagnosticLoggingEnabled = defaults.bool(forKey: Keys.diagnosticLoggingEnabled)
         self.displayControlPreferences = Self.loadDisplayControlPreferences(from: defaults)
     }
 
@@ -356,6 +361,7 @@ final class SettingsStore: ObservableObject {
         static let brightnessPath = "brightnessPath"
         static let launchAtLogin = "launchAtLogin"
         static let hideMenuBarIcon = "hideMenuBarIcon"
+        static let diagnosticLoggingEnabled = DiagnosticLogger.enabledDefaultsKey
         static let displayControlPreferences = "displayControlPreferences"
     }
 }
