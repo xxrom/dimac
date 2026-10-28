@@ -34,8 +34,13 @@ git rev-parse -q --verify "refs/tags/$tag" >/dev/null && fail "tag $tag already 
 notes="$(awk '/^## Unreleased/ { inside = 1; next } /^## / { inside = 0 } inside' "$CHANGELOG" | sed '/^[[:space:]]*$/d')"
 [[ -n "$notes" && "$notes" != "- No changes yet." ]] || fail "add release notes under '## Unreleased' in CHANGELOG.md first"
 
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$PLIST"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $((build + 1))" "$PLIST"
+# Edit values in place; PlistBuddy would reformat the whole file.
+set_plist_string() {
+    perl -0pi -e "s|(<key>\Q$1\E</key>\s*<string>)[^<]*(</string>)|\${1}$2\${2}|" "$PLIST"
+    [[ "$(/usr/libexec/PlistBuddy -c "Print :$1" "$PLIST")" == "$2" ]] || fail "could not set $1 in Info.plist"
+}
+set_plist_string CFBundleShortVersionString "$version"
+set_plist_string CFBundleVersion "$((build + 1))"
 awk -v heading="## $version - $(date +%Y-%m-%d)" '
     { print }
     /^## Unreleased/ && !done { print ""; print "- No changes yet."; print ""; print heading; done = 1 }
