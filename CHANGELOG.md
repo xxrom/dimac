@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- No changes yet.
+
+## 0.1.3 - 2026-10-28
+
 - Much lower idle CPU use: diagnostic log cleanup no longer rereads the whole log on every write, idle checks sleep until the timeout could elapse, and mouse movement is ignored unless dimmed.
 - The settings window is released when closed, and the idle timer only updates while the UI is visible.
 - Diagnostic logging is now an opt-in Advanced setting, off by default. Turning it off deletes the log files.
