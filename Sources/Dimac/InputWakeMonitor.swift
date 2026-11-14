@@ -91,8 +91,11 @@ final class InputWakeMonitor {
 
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
+            // Disabling alone keeps the tap's mach port alive; invalidate it so each restart does not leak one.
+            CFMachPortInvalidate(eventTap)
         }
 
+        context?.takeUnretainedValue().tap = nil
         context?.release()
         context = nil
         runLoopSource = nil

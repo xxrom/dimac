@@ -100,7 +100,7 @@ public final class DiagnosticLogger {
             let date = now()
             entry["timestamp"] = formatter.string(from: date)
             if date >= nextExpiration {
-                try removeExpiredRecords(at: date)
+                removeExpiredRecords(at: date)
             }
             let data = try encodedLine(for: entry)
             let size = (try? manager.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.intValue ?? 0
@@ -111,17 +111,14 @@ public final class DiagnosticLogger {
                 if manager.fileExists(atPath: previous.path) { try manager.moveItem(at: previous, to: oldest) }
                 if manager.fileExists(atPath: fileURL.path) { try manager.moveItem(at: fileURL, to: previous) }
             }
-            let descriptor = open(fileURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+            let descriptor = open(fileURL.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600)
             guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
             defer { try? handle.close() }
             try handle.write(contentsOf: data)
             nextExpiration = min(nextExpiration, date.addingTimeInterval(maximumAge))
         } catch {
-            if !reportedFailure {
-                reportedFailure = true
-                NSLog("Dimac diagnostic logging failed at %@: %@", fileURL.path, error.localizedDescription)
-            }
+            reportFailure(error)
         }
     }
 
@@ -166,30 +163,48 @@ public final class DiagnosticLogger {
         return line
     }
 
-    private func removeExpiredRecords(at date: Date) throws {
+    /// Drops expired and unreadable lines. Works on raw bytes so one torn or non-UTF-8 line (for example
+    /// after a crash mid-write) is skipped instead of failing the whole file, and never throws: the
+    /// schedule always advances, so a bad file cannot make every later record re-read the logs.
+    private func removeExpiredRecords(at date: Date) {
         let manager = FileManager.default
         let cutoff = date.addingTimeInterval(-maximumAge)
         var earliestExpiration = Date.distantFuture
+        defer { nextExpiration = max(earliestExpiration, date.addingTimeInterval(pruneInterval)) }
         for url in [fileURL, fileURL.appendingPathExtension("1"), fileURL.appendingPathExtension("2")] {
             guard manager.fileExists(atPath: url.path) else { continue }
-            let contents = try String(contentsOf: url, encoding: .utf8)
-            let lines = contents.split(separator: "\n")
-            let retained = lines.filter { line in
-                guard let entry = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                      let timestamp = entry["timestamp"] as? String,
-                      let recordedAt = formatter.date(from: timestamp), recordedAt > cutoff else {
-                    return false
+            do {
+                let contents = try Data(contentsOf: url)
+                let lines = contents.split(separator: 0x0a)
+                let retained = lines.filter { line in
+                    guard let entry = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                          let timestamp = entry["timestamp"] as? String,
+                          let recordedAt = formatter.date(from: timestamp), recordedAt > cutoff else {
+                        return false
+                    }
+                    earliestExpiration = min(earliestExpiration, recordedAt.addingTimeInterval(maximumAge))
+                    return true
                 }
-                earliestExpiration = min(earliestExpiration, recordedAt.addingTimeInterval(maximumAge))
-                return true
-            }
-            if retained.isEmpty {
-                try manager.removeItem(at: url)
-            } else if retained.count != lines.count {
-                try Data((retained.joined(separator: "\n") + "\n").utf8).write(to: url, options: .atomic)
-                try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+                if retained.isEmpty {
+                    try manager.removeItem(at: url)
+                } else if retained.count != lines.count || contents.last != 0x0a {
+                    var output = Data(capacity: contents.count)
+                    for line in retained {
+                        output.append(contentsOf: line)
+                        output.append(0x0a)
+                    }
+                    try output.write(to: url, options: .atomic)
+                    try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+                }
+            } catch {
+                reportFailure(error)
             }
         }
-        nextExpiration = max(earliestExpiration, date.addingTimeInterval(pruneInterval))
+    }
+
+    private func reportFailure(_ error: Error) {
+        guard !reportedFailure else { return }
+        reportedFailure = true
+        NSLog("Dimac diagnostic logging failed at %@: %@", fileURL.path, error.localizedDescription)
     }
 }

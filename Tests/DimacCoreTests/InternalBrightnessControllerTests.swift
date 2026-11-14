@@ -135,6 +135,64 @@ final class InternalBrightnessControllerTests: XCTestCase {
         XCTAssertEqual(fallback.restoredSnapshots, [[saved[1]]])
     }
 
+    func testCLIRestoreToleratesDuplicateDisplayIDs() throws {
+        let duplicated = """
+        display 0: main, active, awake, online, built-in, ID 0x1b56353c
+        display 0: brightness 0.100000
+        display 1: active, awake, online, built-in, ID 0x1b56353c
+        display 1: brightness 0.100000
+        """
+        let runner = StubCommandRunner(results: [
+            .init(status: 0, stdout: duplicated, stderr: ""),
+            .init(status: 0, stdout: "", stderr: "")
+        ])
+        let controller = BrightnessCLIBrightnessController(
+            executablePathProvider: { "/usr/local/bin/brightness" },
+            commandRunner: runner
+        )
+
+        try controller.restore([InternalDisplaySnapshot(displayID: 0x1b56353c, brightness: 0.5)])
+
+        XCTAssertEqual(runner.calls.map(\.arguments), [["-lv"], ["-d", "0", "0.5000"]])
+    }
+
+    func testFallbackSnapshotToleratesDuplicateCLIDisplayIDs() throws {
+        let primary = StubInternalBrightnessController(snapshot: [])
+        let fallback = StubInternalBrightnessController(snapshot: [
+            InternalDisplaySnapshot(displayID: 10, brightness: 0.4),
+            InternalDisplaySnapshot(displayID: 10, brightness: 0.9)
+        ])
+        let controller = FallbackInternalBrightnessController(primary: primary, fallback: fallback)
+
+        XCTAssertEqual(try controller.currentSnapshot(), [InternalDisplaySnapshot(displayID: 10, brightness: 0.4)])
+    }
+
+    func testFallbackSurfacesPrimaryErrorWhenCLIAlsoFails() throws {
+        let primaryError = BrightnessError.writeFailed("built-in display 10")
+        let cliError = BrightnessError.commandNotFound("/usr/local/bin/brightness")
+        let primary = StubInternalBrightnessController(snapshot: [InternalDisplaySnapshot(displayID: 10, brightness: 0.5)])
+        let fallback = StubInternalBrightnessController(snapshot: [])
+        let controller = FallbackInternalBrightnessController(primary: primary, fallback: fallback)
+        _ = try controller.currentSnapshot()
+
+        primary.error = primaryError
+        fallback.error = cliError
+        primary.snapshotError = BrightnessError.noBuiltinDisplayFound
+        XCTAssertThrowsError(try controller.currentSnapshot()) { error in
+            XCTAssertEqual(error as? BrightnessError, .noBuiltinDisplayFound)
+        }
+        XCTAssertThrowsError(try controller.restore([InternalDisplaySnapshot(displayID: 10, brightness: 0.5)])) { error in
+            XCTAssertEqual(error as? BrightnessError, .noBuiltinDisplayFound)
+        }
+        primary.snapshotError = nil
+        XCTAssertThrowsError(try controller.setBrightness(percent: 20)) { error in
+            XCTAssertEqual(error as? BrightnessError, primaryError)
+        }
+        XCTAssertThrowsError(try controller.restore([InternalDisplaySnapshot(displayID: 10, brightness: 0.5)])) { error in
+            XCTAssertEqual(error as? BrightnessError, primaryError)
+        }
+    }
+
     private static let twoDisplayList = """
     display 0: main, active, awake, online, built-in, ID 0x1b56353c
         resolution 1512 x 982 pt (3024 x 1964 px), origin (0, 0)
@@ -174,6 +232,9 @@ private final class StubCommandRunner: CommandRunning {
 
 private final class StubInternalBrightnessController: InternalBrightnessManaging {
     var snapshot: [InternalDisplaySnapshot]
+    /// Thrown by writes (`setBrightness`, `restore`), and by `currentSnapshot` unless `snapshotError` is set.
+    var error: Error?
+    var snapshotError: Error?
     private(set) var restoredSnapshots: [[InternalDisplaySnapshot]] = []
 
     init(snapshot: [InternalDisplaySnapshot]) {
@@ -181,12 +242,16 @@ private final class StubInternalBrightnessController: InternalBrightnessManaging
     }
 
     func currentSnapshot() throws -> [InternalDisplaySnapshot] {
-        snapshot
+        if let error = snapshotError ?? (snapshot.isEmpty ? error : nil) { throw error }
+        return snapshot
     }
 
-    func setBrightness(percent: Int) throws {}
+    func setBrightness(percent: Int) throws {
+        if let error { throw error }
+    }
 
     func restore(_ snapshots: [InternalDisplaySnapshot]) throws {
+        if let error { throw error }
         restoredSnapshots.append(snapshots)
     }
 }

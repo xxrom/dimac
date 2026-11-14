@@ -22,7 +22,9 @@ public struct M1DDCDisplayListParser {
                 let patterns = [
                     #"^\s*\[([0-9]+)\]\s*(.*?)\s*$"#,
                     #"^\s*Display\s+([0-9]+)\b[:.)\-\s]*(.*)$"#,
-                    #"^\s*([0-9]+)\b[:.)\-\s]*(.*)$"#
+                    // A bare number needs an explicit list separator ("1: Name", "1) Name", "1. Name",
+                    // "1 - Name") so that lines such as "60 Hz" or "2560x1440" are not read as displays.
+                    #"^\s*([0-9]+)(?:\s*[:)]|\.(?=\s|$)|\s+-(?=\s|$))\s*(.*)$"#
                 ]
 
                 for pattern in patterns {
@@ -44,14 +46,17 @@ public struct M1DDCDisplayListParser {
                     var uuid: String?
                     if match.numberOfRanges >= 3, let nameRange = Range(match.range(at: 2), in: line) {
                         var candidate = String(line[nameRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-                        if candidate.hasSuffix(")"), let start = candidate.lastIndex(of: "(") {
+                        if let start = Self.trailingGroupStart(in: candidate) {
                             let value = String(candidate[candidate.index(after: start)..<candidate.index(before: candidate.endIndex)])
+                                .trimmingCharacters(in: .whitespaces)
                             if let identity = UUID(uuidString: value) {
                                 uuid = identity.uuidString
                                 candidate = String(candidate[..<start]).trimmingCharacters(in: .whitespacesAndNewlines)
+                            } else if Self.isNullPlaceholder(value) {
+                                candidate = String(candidate[..<start]).trimmingCharacters(in: .whitespacesAndNewlines)
                             }
                         }
-                        if !candidate.isEmpty, candidate != "(null)" {
+                        if !candidate.isEmpty, !Self.isNullPlaceholder(candidate) {
                             name = candidate
                         }
                     }
@@ -61,6 +66,31 @@ public struct M1DDCDisplayListParser {
 
                 return nil
             }
+    }
+
+    /// Index of the "(" that opens the parenthesised group ending the string, honouring nesting so that
+    /// "Dell ((null))" yields "(null)" rather than "null)".
+    private static func trailingGroupStart(in value: String) -> String.Index? {
+        guard value.hasSuffix(")") else { return nil }
+        var depth = 0
+        var index = value.endIndex
+        while index > value.startIndex {
+            index = value.index(before: index)
+            switch value[index] {
+            case ")": depth += 1
+            case "(":
+                depth -= 1
+                if depth == 0 { return index }
+            default: break
+            }
+        }
+        return nil
+    }
+
+    /// m1ddc prints a missing UUID or name as "(null)" (Objective-C nil formatting).
+    private static func isNullPlaceholder(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: .whitespaces).lowercased()
+        return normalized == "null" || normalized == "(null)" || normalized.isEmpty
     }
 }
 
@@ -88,16 +118,28 @@ public final class M1DDCBrightnessController: ExternalBrightnessManaging {
             throw BrightnessError.commandNotFound(path)
         }
 
-        let result = try? commandRunner.run(path, arguments: ["display", "list"], timeout: 3)
-
-        if let result, result.status == 0 {
-            let displays = parser.parse(result.stdout)
-            diagnostics.record("ddc.discovery", ["raw": result.stdout, "displays": DiagnosticLogger.encoded(displays)])
-            if !displays.isEmpty {
-                return displays
-            }
+        // A timed-out or failed list call is an error, never "no displays": reading it as empty would fall
+        // back to a single selector-less display and silently leave every other monitor untouched.
+        let arguments = ["display", "list"]
+        let result: CommandResult
+        do {
+            result = try commandRunner.run(path, arguments: arguments, timeout: 3)
+        } catch {
+            diagnostics.record("ddc.discoveryFailed", ["error": error.localizedDescription])
+            throw error
+        }
+        guard result.status == 0 else {
+            diagnostics.record("ddc.discoveryFailed", ["status": result.status, "stderr": result.stderr])
+            throw BrightnessError.commandFailed(path: path, arguments: arguments, status: result.status, stderr: result.stderr)
         }
 
+        let displays = parser.parse(result.stdout)
+        diagnostics.record("ddc.discovery", ["raw": result.stdout, "displays": DiagnosticLogger.encoded(displays)])
+        if !displays.isEmpty {
+            return displays
+        }
+
+        // The list succeeded but printed nothing parseable: probe m1ddc's default display.
         if let luminance = try? readLuminance(display: nil), luminance >= 0 {
             return [
                 ExternalDisplayReference(
@@ -106,19 +148,6 @@ public final class M1DDCBrightnessController: ExternalBrightnessManaging {
                     isDefaultFallback: true
                 )
             ]
-        }
-
-        if let result {
-            if result.status == 0 {
-                return []
-            }
-
-            throw BrightnessError.commandFailed(
-                path: path,
-                arguments: ["display", "list"],
-                status: result.status,
-                stderr: result.stderr
-            )
         }
 
         return []

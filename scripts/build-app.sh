@@ -32,6 +32,16 @@ cp "$EXECUTABLE_PATH" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 cp "$INFO_PLIST_SOURCE" "$CONTENTS_DIR/Info.plist"
 
+# Label local builds so diagnostics can tell them apart from the release they follow. Only the copy in
+# the bundle is stamped; the source Info.plist and CFBundleShortVersionString stay untouched.
+if command -v git >/dev/null 2>&1 \
+    && DIAGNOSTIC_BUILD="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null)" \
+    && [[ -n "$DIAGNOSTIC_BUILD" ]]; then
+    BUNDLE_PLIST="$CONTENTS_DIR/Info.plist"
+    /usr/libexec/PlistBuddy -c "Delete :DimacDiagnosticBuild" "$BUNDLE_PLIST" >/dev/null 2>&1 || true
+    /usr/libexec/PlistBuddy -c "Add :DimacDiagnosticBuild string $DIAGNOSTIC_BUILD" "$BUNDLE_PLIST" >/dev/null
+fi
+
 setopt local_options null_glob
 for resource in "$ROOT"/Sources/Dimac/Resources/*; do
     [[ "${resource:t}" == "Info.plist" ]] && continue

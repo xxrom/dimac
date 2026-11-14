@@ -28,12 +28,14 @@ final class ConnectedDisplayDiscovery {
 
     func displays() -> [ConnectedDisplayRow] {
         let screenRows = Self.displaysFromScreens()
-        if let cliRows = externalDisplaysFromBrightnessCLI(screenRows: screenRows),
-           !cliRows.isEmpty {
-            return cliRows
+        guard let cliRows = externalDisplaysFromBrightnessCLI(screenRows: screenRows), !cliRows.isEmpty else {
+            return screenRows
         }
 
-        return screenRows
+        // The CLI adds hardware brightness, but it can omit a display NSScreen knows about; keep those
+        // rows instead of letting them vanish from the UI.
+        let cliIDs = Set(cliRows.map(\.id))
+        return cliRows + screenRows.filter { !cliIDs.contains($0.id) }
     }
 
     private func externalDisplaysFromBrightnessCLI(
@@ -44,7 +46,7 @@ final class ConnectedDisplayDiscovery {
             return nil
         }
 
-        guard let result = try? commandRunner.run(path, arguments: ["-lv"], timeout: 3) else {
+        guard let result = try? commandRunner.run(path, arguments: ["-lv"], timeout: 3), result.status == 0 else {
             return nil
         }
 
@@ -56,7 +58,7 @@ final class ConnectedDisplayDiscovery {
         }
 
         let parser = BrightnessVerboseDisplayParser()
-        let screenRowsByID = Dictionary(uniqueKeysWithValues: screenRows.map { ($0.id, $0) })
+        let screenRowsByID = Dictionary(screenRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
         return parser.parse(output)
             .map { display in

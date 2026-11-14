@@ -49,4 +49,8 @@ with tempfile.TemporaryDirectory(prefix='dimac-tests-') as tmp:
         subprocess.run(['swiftc'] + (['-sdk', sdk] if sdk else []) + ['-parse-as-library', '-I', str(build / 'Modules'), str(swift), *map(str, objects), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
         count += len(methods)
+if count == 0:
+    filter_text = f' matching {sys.argv[1]!r}' if len(sys.argv) > 1 else ''
+    print(f'FAIL: no test scenarios{filter_text} ran (CLT assertion runner)', file=sys.stderr)
+    sys.exit(1)
 print(f'PASS: {count} scenarios (CLT assertion runner)')

@@ -177,6 +177,66 @@ final class DiagnosticLoggerTests: XCTestCase {
         XCTAssertNotNil(events[3]["error"])
     }
 
+    func testCorruptLineIsDroppedAndDoesNotBlockLaterRecords() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("diagnostics.jsonl")
+        var now = Date(timeIntervalSince1970: 50_000)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let recent = try JSONSerialization.data(withJSONObject: ["event": "recent", "timestamp": formatter.string(from: now)])
+        var contents = recent
+        contents.append(0x0a)
+        contents.append(contentsOf: [0x7b, 0x22, 0xff, 0xfe, 0x0a]) // torn, invalid UTF-8 line
+        contents.append(contentsOf: Array(#"{"event":"torn"#.utf8)) // unterminated final line
+        try contents.write(to: url)
+
+        let logger = DiagnosticLogger(fileURL: url, now: { now })
+        logger.record("first")
+        now.addTimeInterval(1)
+        logger.record("second")
+
+        let data = try Data(contentsOf: url)
+        XCTAssertNotNil(String(data: data, encoding: .utf8))
+        let events = try data.split(separator: 0x0a).map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0)) as? [String: Any])
+        }
+        XCTAssertEqual(events.compactMap { $0["event"] as? String }, ["recent", "first", "second"])
+    }
+
+    func testDisabledLoggerTouchesNoFiles() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let logger = DiagnosticLogger(fileURL: directory.appendingPathComponent("diagnostics.jsonl"), isEnabled: false)
+        var evaluated = false
+        logger.record("ignored", { () -> [String: Any] in evaluated = true; return ["key": "value"] }())
+
+        XCTAssertFalse(evaluated)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testDeleteLogFilesRemovesCurrentRotatedAndLockFiles() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("diagnostics.jsonl")
+        let logger = DiagnosticLogger(fileURL: url)
+        logger.record("created")
+        for extra in [url.appendingPathExtension("1"), url.appendingPathExtension("2")] {
+            try Data("{}\n".utf8).write(to: extra)
+        }
+        let unrelated = directory.appendingPathComponent("keep.txt")
+        try Data().write(to: unrelated)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(".diagnostics.jsonl.lock").path))
+
+        logger.deleteLogFiles()
+
+        let remaining = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        XCTAssertEqual(remaining, ["keep.txt"])
+        logger.record("after-delete")
+        XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("after-delete"))
+    }
+
     func testUnwritableLogDoesNotThrowIntoBrightnessCode() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

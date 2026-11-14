@@ -133,8 +133,10 @@ public final class BrightnessCLIBrightnessController: InternalBrightnessManaging
         }
 
         let path = executablePathProvider()
+        // The CLI can repeat a display ID (e.g. mirroring); keep the first index rather than trapping.
         let displayIndexesByID = Dictionary(
-            uniqueKeysWithValues: try loadDisplayList(path: path).map { ($0.id, $0.index) }
+            try loadDisplayList(path: path).map { ($0.id, $0.index) },
+            uniquingKeysWith: { first, _ in first }
         )
 
         var firstError: Error?
@@ -286,7 +288,8 @@ public final class FallbackInternalBrightnessController: InternalBrightnessManag
         }
 
         var snapshotsByID = Dictionary(
-            uniqueKeysWithValues: fallbackSnapshots.map { ($0.displayID, $0) }
+            fallbackSnapshots.map { ($0.displayID, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
         for snapshot in primarySnapshots {
             snapshotsByID[snapshot.displayID] = snapshot
@@ -294,7 +297,8 @@ public final class FallbackInternalBrightnessController: InternalBrightnessManag
 
         let snapshots = snapshotsByID.values.sorted { $0.displayID < $1.displayID }
         guard !snapshots.isEmpty else {
-            throw fallbackError ?? primaryError ?? BrightnessError.noBuiltinDisplayFound
+            // DisplayServices is the real control path; a missing optional CLI must not hide why it failed.
+            throw primaryError ?? fallbackError ?? BrightnessError.noBuiltinDisplayFound
         }
 
         lastPrimaryDisplayIDs = Set(primarySnapshots.map(\.displayID))
@@ -311,7 +315,7 @@ public final class FallbackInternalBrightnessController: InternalBrightnessManag
         do {
             try primary.setBrightness(percent: percent)
         } catch {
-            try fallback.setBrightness(percent: percent)
+            try recover(from: error) { try fallback.setBrightness(percent: percent) }
             if !lastPrimaryDisplayIDs.isSubset(of: lastFallbackDisplayIDs) {
                 throw error
             }
@@ -332,7 +336,7 @@ public final class FallbackInternalBrightnessController: InternalBrightnessManag
         do {
             currentPrimaryIDs = Set(try primary.currentSnapshot().map(\.displayID))
         } catch {
-            try fallback.restore(snapshots)
+            try recover(from: error) { try fallback.restore(snapshots) }
             return
         }
 
@@ -342,12 +346,23 @@ public final class FallbackInternalBrightnessController: InternalBrightnessManag
         do {
             try primary.restore(primarySnapshots)
         } catch {
-            try fallback.restore(snapshots)
+            try recover(from: error) { try fallback.restore(snapshots) }
             return
         }
 
         if !fallbackSnapshots.isEmpty {
             try fallback.restore(fallbackSnapshots)
+        }
+    }
+
+    /// Runs the CLI as a recovery path for a DisplayServices failure. If the recovery also fails, the
+    /// primary error is reported: it names the real problem, whereas the CLI's error (often
+    /// `commandNotFound` because the optional tool is not installed) only hides it.
+    private func recover(from primaryError: Error, _ recovery: () throws -> Void) throws {
+        do {
+            try recovery()
+        } catch {
+            throw primaryError
         }
     }
 }

@@ -39,4 +39,38 @@ final class M1DDCDisplayListParserTests: XCTestCase {
         let parser = M1DDCDisplayListParser()
         XCTAssertTrue(parser.parse("Could not find a suitable external display.").isEmpty)
     }
+
+    func testEmptyOutputHasNoDisplays() {
+        let parser = M1DDCDisplayListParser()
+        XCTAssertTrue(parser.parse("").isEmpty)
+        XCTAssertTrue(parser.parse("\n  \n\t\n").isEmpty)
+    }
+
+    func testNullUUIDIsTreatedAsAbsent() {
+        let displays = M1DDCDisplayListParser().parse("""
+        [1] Dell U2720Q ((null))
+        [2] LG UltraFine (null)
+        [3] (null) (NULL)
+        2: (null)
+        """)
+
+        XCTAssertEqual(displays.map(\.name), ["Dell U2720Q", "LG UltraFine", "Display 3", "Display 2"])
+        XCTAssertTrue(displays.allSatisfy { $0.uuid == nil })
+    }
+
+    func testBareNumberLinesAreNotDisplays() {
+        let displays = M1DDCDisplayListParser().parse("""
+        60 Hz
+        2560 x 1440
+        100
+        1.5 nits
+        4 -5
+        1) Dell
+        2. LG
+        3 - BenQ
+        """)
+
+        XCTAssertEqual(displays.map(\.selector), ["1", "2", "3"])
+        XCTAssertEqual(displays.map(\.name), ["Dell", "LG", "BenQ"])
+    }
 }

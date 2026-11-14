@@ -88,6 +88,69 @@ final class ExternalBrightnessControllerTests: XCTestCase {
             XCTAssertEqual(try controller.currentSnapshot(for: [display]).first?.luminance, level)
         }
     }
+
+    func testDiscoveryReportsListTimeoutInsteadOfFallingBackToDefaultDisplay() {
+        let path = "/bin/sh" // discovery requires an executable path; the stub never runs it
+        let runner = ScriptedRunner { arguments in
+            if arguments == ["display", "list"] {
+                throw BrightnessError.commandTimedOut(path: path, arguments: arguments)
+            }
+            return CommandResult(status: 0, stdout: "65", stderr: "")
+        }
+        let controller = M1DDCBrightnessController(executablePathProvider: { path }, commandRunner: runner)
+
+        XCTAssertThrowsError(try controller.discoverDisplays()) { error in
+            XCTAssertEqual(error as? BrightnessError, .commandTimedOut(path: path, arguments: ["display", "list"]))
+        }
+        XCTAssertEqual(runner.arguments, [["display", "list"]])
+    }
+
+    func testDiscoveryReportsFailedListInsteadOfFallingBackToDefaultDisplay() {
+        let runner = ScriptedRunner { arguments in
+            CommandResult(status: arguments == ["display", "list"] ? 1 : 0, stdout: "65", stderr: "busy")
+        }
+        let controller = M1DDCBrightnessController(executablePathProvider: { "/bin/sh" }, commandRunner: runner)
+
+        XCTAssertThrowsError(try controller.discoverDisplays())
+        XCTAssertEqual(runner.arguments, [["display", "list"]])
+    }
+
+    func testDiscoveryUsesDefaultDisplayOnlyWhenSuccessfulListIsUnparseable() throws {
+        var listOutput = "60 Hz\n"
+        var defaultReadable = true
+        let runner = ScriptedRunner { arguments in
+            if arguments == ["display", "list"] {
+                return CommandResult(status: 0, stdout: listOutput, stderr: "")
+            }
+            return CommandResult(status: defaultReadable ? 0 : 1, stdout: "65", stderr: "")
+        }
+        let controller = M1DDCBrightnessController(executablePathProvider: { "/bin/sh" }, commandRunner: runner)
+
+        let fallback = try controller.discoverDisplays()
+        XCTAssertEqual(fallback.count, 1)
+        XCTAssertTrue(fallback[0].isDefaultFallback)
+        XCTAssertNil(fallback[0].selector)
+
+        defaultReadable = false
+        XCTAssertTrue(try controller.discoverDisplays().isEmpty)
+
+        listOutput = "[1] Dell\n[2] LG\n"
+        XCTAssertEqual(try controller.discoverDisplays().map(\.name), ["Dell", "LG"])
+    }
+}
+
+private final class ScriptedRunner: CommandRunning {
+    var arguments: [[String]] = []
+    private let respond: ([String]) throws -> CommandResult
+
+    init(_ respond: @escaping ([String]) throws -> CommandResult) {
+        self.respond = respond
+    }
+
+    func run(_ path: String, arguments: [String], timeout: TimeInterval) throws -> CommandResult {
+        self.arguments.append(arguments)
+        return try respond(arguments)
+    }
 }
 
 private final class PartialFailureRunner: CommandRunning {

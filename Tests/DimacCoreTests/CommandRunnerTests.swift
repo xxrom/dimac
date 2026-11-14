@@ -63,4 +63,49 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertEqual(result, -1)
         XCTAssertEqual(resultError, ESRCH)
     }
+
+    func testExitedCommandReturnsPromptlyWhileGrandchildHoldsOutputPipe() throws {
+        let runner = ProcessCommandRunner(diagnostics: DiagnosticLogger(fileURL: Self.scratchLogURL(), isEnabled: false))
+        let started = Date()
+        let result = try runner.run("/bin/sh", arguments: ["-c", "sleep 30 & echo $!; echo hi"], timeout: 5)
+        let elapsed = Date().timeIntervalSince(started)
+        let lines = result.stdout.split(separator: "\n")
+        if let grandchild = lines.first.flatMap({ pid_t(String($0)) }) {
+            _ = kill(grandchild, SIGKILL)
+        }
+
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(lines.last, "hi")
+        XCTAssertLessThanOrEqual(elapsed, 2)
+    }
+
+    func testTimeoutIsBoundedAndKillsGrandchildHoldingOutputPipe() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("grandchild.pid")
+
+        let runner = ProcessCommandRunner(diagnostics: DiagnosticLogger(fileURL: Self.scratchLogURL(), isEnabled: false))
+        let started = Date()
+        XCTAssertThrowsError(try runner.run(
+            "/bin/sh", arguments: ["-c", "sleep 30 & printf '%s' \"$!\" > '\(pidFile.path)'; echo hi; sleep 30"], timeout: 0.5
+        )) { error in
+            XCTAssertEqual(error as? BrightnessError, .commandTimedOut(path: "/bin/sh", arguments: [
+                "-c", "sleep 30 & printf '%s' \"$!\" > '\(pidFile.path)'; echo hi; sleep 30"
+            ]))
+        }
+        XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 3)
+
+        let grandchild = pid_t(try XCTUnwrap(Int(String(contentsOf: pidFile, encoding: .utf8))))
+        defer { if kill(grandchild, 0) == 0 { _ = kill(grandchild, SIGKILL) } }
+        let deadline = Date().addingTimeInterval(2)
+        while kill(grandchild, 0) == 0, Date() < deadline {
+            usleep(10_000)
+        }
+        XCTAssertEqual(kill(grandchild, 0), -1)
+    }
+
+    private static func scratchLogURL() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("dimac-runner-\(UUID().uuidString).jsonl")
+    }
 }
