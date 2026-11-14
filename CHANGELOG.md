@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- No changes yet.
+- Fixed a "Dimac" tooltip that could stay stuck on screen until the menu bar icon was clicked. The icon no longer has a tooltip.
 
 ## 0.1.3 - 2026-10-28
 

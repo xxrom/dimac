@@ -47,7 +47,9 @@ final class StatusItemController: NSObject {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePopover)
-        item.button?.toolTip = "Dimac"
+        // No tooltip: macOS draws the menu bar item out of process, so the mouse-exit that should
+        // dismiss it can be lost (always with an auto-hiding menu bar), stranding it on screen.
+        item.button?.setAccessibilityLabel("Dimac")
 
         if let image = NSImage(systemSymbolName: "circle.lefthalf.filled", accessibilityDescription: "Dimac") {
             let configuration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
