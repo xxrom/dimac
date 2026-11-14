@@ -15,46 +15,90 @@ final class SettingsStore: ObservableObject {
     static let maxTimeoutSeconds = 180 * 60
 
     @Published var isEnabled: Bool {
-        didSet { defaults.set(isEnabled, forKey: Keys.isEnabled) }
+        didSet {
+            guard isEnabled != oldValue else { return }
+            defaults.set(isEnabled, forKey: Keys.isEnabled)
+        }
     }
 
     @Published var idleTimeoutSeconds: Int {
         didSet {
+            guard idleTimeoutSeconds != oldValue else { return }
             defaults.set(idleTimeoutSeconds, forKey: Keys.idleTimeoutSeconds)
         }
     }
 
     @Published var dimPercent: Int {
         didSet {
+            guard dimPercent != oldValue else { return }
             defaults.set(dimPercent, forKey: Keys.dimPercent)
         }
     }
 
+    /// Raw text of the m1ddc path field. It is bound directly to a text field, so it is
+    /// deliberately not rewritten while the user types (that would make it impossible to
+    /// type a space inside a path, or to clear the field before typing a new one).
+    /// The persisted value is normalised; code that runs the tool should read
+    /// `resolvedM1ddcPath`.
     @Published var m1ddcPath: String {
-        didSet { defaults.set(m1ddcPath, forKey: Keys.m1ddcPath) }
+        didSet {
+            guard m1ddcPath != oldValue else { return }
+            defaults.set(resolvedM1ddcPath, forKey: Keys.m1ddcPath)
+        }
     }
 
+    /// Raw text of the brightness path field; see `m1ddcPath`. Read `resolvedBrightnessPath`.
     @Published var brightnessPath: String {
-        didSet { defaults.set(brightnessPath, forKey: Keys.brightnessPath) }
+        didSet {
+            guard brightnessPath != oldValue else { return }
+            defaults.set(resolvedBrightnessPath, forKey: Keys.brightnessPath)
+        }
+    }
+
+    /// `m1ddcPath` trimmed of whitespace, or the default path when empty — the same
+    /// normalisation that is applied when the setting is loaded at launch.
+    var resolvedM1ddcPath: String {
+        Self.normalizedPath(m1ddcPath, fallback: CommandLocator.m1ddcDefaultPath)
+    }
+
+    /// `brightnessPath` trimmed of whitespace, or the default path when empty.
+    var resolvedBrightnessPath: String {
+        Self.normalizedPath(brightnessPath, fallback: CommandLocator.brightnessDefaultPath)
     }
 
     @Published var launchAtLogin: Bool {
-        didSet { defaults.set(launchAtLogin, forKey: Keys.launchAtLogin) }
+        didSet {
+            guard launchAtLogin != oldValue else { return }
+            defaults.set(launchAtLogin, forKey: Keys.launchAtLogin)
+        }
     }
 
     @Published var hideMenuBarIcon: Bool {
-        didSet { defaults.set(hideMenuBarIcon, forKey: Keys.hideMenuBarIcon) }
+        didSet {
+            guard hideMenuBarIcon != oldValue else { return }
+            defaults.set(hideMenuBarIcon, forKey: Keys.hideMenuBarIcon)
+        }
     }
 
     @Published var diagnosticLoggingEnabled: Bool {
-        didSet { defaults.set(diagnosticLoggingEnabled, forKey: Keys.diagnosticLoggingEnabled) }
+        didSet {
+            guard diagnosticLoggingEnabled != oldValue else { return }
+            defaults.set(diagnosticLoggingEnabled, forKey: Keys.diagnosticLoggingEnabled)
+        }
     }
 
     @Published private(set) var displayControlPreferences: [String: DisplayControlPreference] {
-        didSet { saveDisplayControlPreferences() }
+        didSet {
+            guard displayControlPreferences != oldValue else { return }
+            saveDisplayControlPreferences()
+        }
     }
 
     let defaults: UserDefaults
+
+    /// Raw JSON values of stored per-display entries that could not be decoded. They are
+    /// written back unchanged on every save, so one bad entry never erases the others.
+    private var undecodableDisplayControlEntries: [String: Any]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -85,7 +129,16 @@ final class SettingsStore: ObservableObject {
         self.launchAtLogin = defaults.bool(forKey: Keys.launchAtLogin)
         self.hideMenuBarIcon = defaults.bool(forKey: Keys.hideMenuBarIcon)
         self.diagnosticLoggingEnabled = defaults.bool(forKey: Keys.diagnosticLoggingEnabled)
-        self.displayControlPreferences = Self.loadDisplayControlPreferences(from: defaults)
+
+        let loaded = Self.loadDisplayControlPreferences(from: defaults)
+        self.undecodableDisplayControlEntries = loaded.undecodableEntries
+        self.displayControlPreferences = loaded.preferences
+
+        if let unreadableData = loaded.unreadableData,
+           defaults.object(forKey: Keys.displayControlPreferencesBackup) == nil {
+            // The whole blob is unreadable and the next save will replace it, so keep a copy.
+            defaults.set(unreadableData, forKey: Keys.displayControlPreferencesBackup)
+        }
     }
 
     func currentSettings(externalBrightnessByDisplay: [String: Int]) -> DimmerSettings {
@@ -93,35 +146,54 @@ final class SettingsStore: ObservableObject {
             isEnabled: isEnabled,
             idleTimeoutSeconds: Self.clampedSeconds(idleTimeoutSeconds),
             dimPercent: dimPercent,
-            m1ddcPath: m1ddcPath,
+            m1ddcPath: resolvedM1ddcPath,
             externalBrightnessByDisplay: externalBrightnessByDisplay
         )
     }
 
     func setIdleTimeoutSeconds(_ value: Int) {
-        idleTimeoutSeconds = Self.clampedSeconds(value)
+        let seconds = Self.clampedSeconds(value)
+        guard seconds != idleTimeoutSeconds else { return }
+        idleTimeoutSeconds = seconds
     }
 
     func setTimeoutSliderValue(_ value: Double) {
         setIdleTimeoutSeconds(Self.seconds(fromSliderValue: value))
     }
 
+    /// Below a minute the stepper moves in 1 s steps, from a minute up in 60 s steps:
+    /// 59 s -> 60 s, 60 s -> 120 s.
     func incrementTimeout() {
-        setIdleTimeoutSeconds(idleTimeoutSeconds + timeoutStep)
+        let current = Self.clampedSeconds(idleTimeoutSeconds)
+        setIdleTimeoutSeconds(current < 60 ? current + 1 : current + 60)
     }
 
+    /// Mirror of `incrementTimeout`. Stepping down from above a minute never lands below
+    /// 60 s (61-120 s -> 60 s); from exactly 60 s it goes to 59 s, then in 1 s steps.
     func decrementTimeout() {
-        setIdleTimeoutSeconds(idleTimeoutSeconds - timeoutStep)
+        let current = Self.clampedSeconds(idleTimeoutSeconds)
+        setIdleTimeoutSeconds(current > 60 ? max(60, current - 60) : current - 1)
     }
 
     func setDimPercent(_ value: Int) {
-        dimPercent = DimmerSettings.clampedPercent(value)
+        let percent = DimmerSettings.clampedPercent(value)
+        if percent != dimPercent {
+            dimPercent = percent
+        }
+
+        guard displayControlPreferences.values.contains(where: { $0.dimPercent != percent }) else {
+            return
+        }
+
         let updatedAt = Date()
         displayControlPreferences = displayControlPreferences.mapValues { preference in
-            Self.normalizedDisplayControlPreference(
+            guard preference.dimPercent != percent else {
+                return preference
+            }
+            return Self.normalizedDisplayControlPreference(
                 id: preference.id,
                 displayName: preference.displayName,
-                dimPercent: dimPercent,
+                dimPercent: percent,
                 updatedAt: updatedAt
             )
         }
@@ -182,10 +254,6 @@ final class SettingsStore: ObservableObject {
         Self.formatTimeout(idleTimeoutSeconds)
     }
 
-    private var timeoutStep: Int {
-        idleTimeoutSeconds < 60 ? 1 : 60
-    }
-
     private static func clampedSeconds(_ value: Int) -> Int {
         min(maxTimeoutSeconds, max(minTimeoutSeconds, value))
     }
@@ -231,6 +299,9 @@ final class SettingsStore: ObservableObject {
         return components.joined(separator: " ")
     }
 
+    /// Parses "5" (minutes), "30s", "5m", "2h" or combinations such as "1h 30m 5s".
+    /// Returns nil for empty, malformed, overflowing or non-positive input, so "0" or "-5"
+    /// are refused instead of being clamped up to a 1-second timeout.
     private static func parseTimeout(_ text: String) -> Int? {
         let normalized = text
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -243,7 +314,7 @@ final class SettingsStore: ObservableObject {
 
         if let minutes = Int(normalized) {
             let (seconds, overflow) = minutes.multipliedReportingOverflow(by: 60)
-            return overflow ? nil : seconds
+            return overflow || seconds <= 0 ? nil : seconds
         }
 
         let characters = Array(normalized)
@@ -277,17 +348,16 @@ final class SettingsStore: ObservableObject {
             totalSeconds = newTotal
         }
 
-        return totalSeconds
+        return totalSeconds > 0 ? totalSeconds : nil
     }
 
     private static func storedString(forKey key: String, in defaults: UserDefaults, fallback: String) -> String {
-        guard let value = defaults.string(forKey: key)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else {
-            return fallback
-        }
+        normalizedPath(defaults.string(forKey: key) ?? "", fallback: fallback)
+    }
 
-        return value
+    private static func normalizedPath(_ path: String, fallback: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
     }
 
     @discardableResult
@@ -297,6 +367,12 @@ final class SettingsStore: ObservableObject {
         dimPercent: Int,
         existing: DisplayControlPreference?
     ) -> DisplayControlPreference {
+        if let existing,
+           existing.displayName == displayName,
+           existing.dimPercent == DimmerSettings.clampedPercent(dimPercent) {
+            return existing
+        }
+
         let preference = Self.normalizedDisplayControlPreference(
             id: existing?.id ?? key,
             displayName: displayName,
@@ -310,33 +386,71 @@ final class SettingsStore: ObservableObject {
     private func saveDisplayControlPreferences() {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(displayControlPreferences) else {
+        guard var data = try? encoder.encode(displayControlPreferences) else {
             return
+        }
+
+        let preserved = undecodableDisplayControlEntries.filter { displayControlPreferences[$0.key] == nil }
+        if !preserved.isEmpty {
+            // Never replace the stored blob with less data than it holds: merge the entries
+            // that could not be decoded back in, and skip the write if that fails.
+            guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                return
+            }
+            for (key, value) in preserved {
+                object[key] = value
+            }
+            guard JSONSerialization.isValidJSONObject(object),
+                  let merged = try? JSONSerialization.data(withJSONObject: object) else {
+                return
+            }
+            data = merged
         }
 
         defaults.set(data, forKey: Keys.displayControlPreferences)
     }
 
+    private struct LoadedDisplayControlPreferences {
+        var preferences: [String: DisplayControlPreference] = [:]
+        /// Entries that are present in the stored dictionary but do not decode as a preference.
+        var undecodableEntries: [String: Any] = [:]
+        /// The stored blob, when it is not a JSON dictionary at all.
+        var unreadableData: Data?
+    }
+
+    /// Decodes stored preferences entry by entry so one malformed entry does not discard the rest.
     private static func loadDisplayControlPreferences(
         from defaults: UserDefaults
-    ) -> [String: DisplayControlPreference] {
+    ) -> LoadedDisplayControlPreferences {
+        var result = LoadedDisplayControlPreferences()
         guard let data = defaults.data(forKey: Keys.displayControlPreferences) else {
-            return [:]
+            return result
+        }
+
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            result.unreadableData = data
+            return result
         }
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let preferences = (
-            try? decoder.decode([String: DisplayControlPreference].self, from: data)
-        ) ?? [:]
-        return preferences.mapValues { preference in
-            normalizedDisplayControlPreference(
+        for (key, value) in object {
+            guard JSONSerialization.isValidJSONObject(value),
+                  let entryData = try? JSONSerialization.data(withJSONObject: value),
+                  let preference = try? decoder.decode(DisplayControlPreference.self, from: entryData) else {
+                result.undecodableEntries[key] = value
+                continue
+            }
+
+            result.preferences[key] = normalizedDisplayControlPreference(
                 id: preference.id,
                 displayName: preference.displayName,
                 dimPercent: preference.dimPercent,
                 updatedAt: preference.updatedAt
             )
         }
+
+        return result
     }
 
     private static func normalizedDisplayControlPreference(
@@ -363,5 +477,6 @@ final class SettingsStore: ObservableObject {
         static let hideMenuBarIcon = "hideMenuBarIcon"
         static let diagnosticLoggingEnabled = DiagnosticLogger.enabledDefaultsKey
         static let displayControlPreferences = "displayControlPreferences"
+        static let displayControlPreferencesBackup = "displayControlPreferences.unreadableBackup"
     }
 }
