@@ -315,23 +315,35 @@ final class DimmerControllerTests: XCTestCase {
         XCTAssertFalse(controller.isDimmed)
     }
 
-    func testWriteOnlyExternalIsNotDimmedBecauseItsCurrentLevelIsUnknown() {
+    func testMixedReadableAndUnreadableExternalsHaveIndependentBaselines() {
         let first = ExternalDisplayReference(selector: "1", name: "Readable")
         let second = ExternalDisplayReference(selector: "2", name: "Write only")
         let external = MultiExternalBrightnessController(displays: [first, second], luminanceBySelector: ["1": 80])
         let internalController = MockInternalBrightnessController()
         let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10, externalDimPercentByDisplay: [second.brightnessPreferenceKey: 20]) }, internalBrightness: internalController, externalBrightness: external, snapshotStore: MemorySnapshotStore())
+        // A monitor without DDC read support is dimmed from the last level set through the app.
         controller.recordManualExternalBrightness(55, for: second)
         controller.dimNow()
         XCTAssertEqual(external.luminanceBySelector["1"], 10)
-        // The panel may already be darker than 20 (or than the saved 55); a blind write could brighten it.
+        XCTAssertEqual(external.luminanceBySelector["2"], 20)
+        controller.handleUserActivity()
+        XCTAssertEqual(external.luminanceBySelector["1"], 80)
+        XCTAssertEqual(external.luminanceBySelector["2"], 55)
+        XCTAssertEqual(internalController.currentBrightness, 0.7, accuracy: 0.0001)
+    }
+
+    func testUnreadableExternalWithoutKnownLevelIsNotDimmed() {
+        let first = ExternalDisplayReference(selector: "1", name: "Readable")
+        let second = ExternalDisplayReference(selector: "2", name: "Write only")
+        let external = MultiExternalBrightnessController(displays: [first, second], luminanceBySelector: ["1": 80])
+        let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 10) }, internalBrightness: MockInternalBrightnessController(), externalBrightness: external, snapshotStore: MemorySnapshotStore())
+        controller.dimNow()
+        XCTAssertEqual(external.luminanceBySelector["1"], 10)
+        // Its level is unknown, so a blind write could brighten it.
         XCTAssertNil(external.luminanceBySelector["2"])
-        XCTAssertFalse(external.restoreSelectors.contains("2"))
-        XCTAssertEqual(controller.statusMessage, "Dimmed with warnings")
         controller.handleUserActivity()
         XCTAssertEqual(external.luminanceBySelector["1"], 80)
         XCTAssertNil(external.luminanceBySelector["2"])
-        XCTAssertEqual(internalController.currentBrightness, 0.7, accuracy: 0.0001)
     }
 
     func testDimNeverBrightensDisplayWhoseReadingIsUntrusted() {
@@ -351,19 +363,20 @@ final class DimmerControllerTests: XCTestCase {
         XCTAssertEqual(external.luminanceBySelector["1"], 80)
     }
 
-    func testDimSkipsExternalWhoseReadFailsEvenWithSavedLevel() {
+    func testExternalWhoseReadFailsDimsFromLevelSetThroughApp() {
         let external = MockExternalBrightnessController()
-        external.currentLuminance = 20
+        external.currentLuminance = 80
         external.snapshotError = TestError.failed
         let controller = DimmerController(settingsProvider: { DimmerSettings(dimPercent: 50) }, internalBrightness: MockInternalBrightnessController(),
             externalBrightness: external, snapshotStore: MemorySnapshotStore())
         controller.recordManualExternalBrightness(80, for: external.display)
 
         controller.dimNow()
+        XCTAssertEqual(external.currentLuminance, 50)
 
-        XCTAssertEqual(external.restoreCallCount, 0)
-        XCTAssertEqual(external.currentLuminance, 20)
-        XCTAssertEqual(controller.statusMessage, "Dimmed with warnings")
+        controller.handleUserActivity()
+        XCTAssertEqual(external.currentLuminance, 80)
+        XCTAssertFalse(controller.isDimmed)
     }
 
     func testNonPositiveManualLevelIsIgnored() {

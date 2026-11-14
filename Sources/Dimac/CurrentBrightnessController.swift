@@ -7,18 +7,24 @@ protocol CurrentBrightnessManaging {
 }
 
 final class CurrentBrightnessController: CurrentBrightnessManaging {
-    /// How long a discovered display list is reused, so dragging a slider does not spawn
-    /// `m1ddc display list` before every write.
-    private static let discoveryCacheLifetime: TimeInterval = 5
+    /// How long a discovered display list is reused, so repeated reads do not each spawn
+    /// `m1ddc display list`. Writes always discover afresh.
+    static let defaultDiscoveryCacheLifetime: TimeInterval = 5
 
     private let internalBrightness: InternalBrightnessManaging
     private let externalBrightness: ExternalBrightnessManaging
     private var cachedDisplays: [ExternalDisplayReference] = []
     private var cachedAt: TimeInterval?
+    private let discoveryCacheLifetime: TimeInterval
 
-    init(internalBrightness: InternalBrightnessManaging, externalBrightness: ExternalBrightnessManaging) {
+    init(
+        internalBrightness: InternalBrightnessManaging,
+        externalBrightness: ExternalBrightnessManaging,
+        discoveryCacheLifetime: TimeInterval = CurrentBrightnessController.defaultDiscoveryCacheLifetime
+    ) {
         self.internalBrightness = internalBrightness
         self.externalBrightness = externalBrightness
+        self.discoveryCacheLifetime = discoveryCacheLifetime
     }
 
     func read(_ row: DisplayControlRow) throws -> Int {
@@ -51,11 +57,12 @@ final class CurrentBrightnessController: CurrentBrightnessManaging {
         let percent = min(100, max(0, percent))
         switch row.mode {
         case .ddc(let saved):
-            let (display, cached) = try resolve(saved, failure: .writeFailed(saved.name))
+            // Writes never trust the cache: a monitor swapped since the last discovery must be rejected.
+            let (display, _) = try resolve(saved, failure: .writeFailed(saved.name), allowCached: false)
             do {
                 try externalBrightness.restore([ExternalDisplaySnapshot(display: display, luminance: percent)])
             } catch {
-                if cached { invalidateDiscoveryCache() }
+                invalidateDiscoveryCache()
                 throw error
             }
         case .brightnessCLI:
@@ -71,13 +78,14 @@ final class CurrentBrightnessController: CurrentBrightnessManaging {
     /// so a stale list cannot redirect a write to a different monitor that took over its selector.
     private func resolve(
         _ saved: ExternalDisplayReference,
-        failure: BrightnessError
+        failure: BrightnessError,
+        allowCached: Bool = true
     ) throws -> (display: ExternalDisplayReference, cached: Bool) {
         guard saved.hasReliableIdentity else {
             throw failure
         }
 
-        if let cachedAt, ProcessInfo.processInfo.systemUptime - cachedAt < Self.discoveryCacheLifetime {
+        if allowCached, let cachedAt, ProcessInfo.processInfo.systemUptime - cachedAt < discoveryCacheLifetime {
             let matches = cachedDisplays.filter { $0.matchesRecoveryIdentity(of: saved) }
             if matches.count == 1, let display = matches.first, display.uuid != nil {
                 return (display, true)

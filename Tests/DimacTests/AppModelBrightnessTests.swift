@@ -83,13 +83,16 @@ final class AppModelBrightnessTests: XCTestCase {
         external.displays = []
         dimmer.handleUserActivity()
         XCTAssertEqual(hardware.value, 0.7, accuracy: 0.0001)
-        XCTAssertTrue(dimmer.isDimmed)
+        // The unplugged monitor is parked: the app is no longer "dimmed", but its level is kept.
+        XCTAssertFalse(dimmer.isDimmed)
+        XCTAssertTrue(dimmer.hasDormantRestore)
         XCTAssertEqual(hardware.writeCount, 2)
 
         model.refreshExternalDisplays()
         model.setCurrentBrightness(45, for: "display:1")
         XCTAssertEqual(hardware.value, 0.45, accuracy: 0.0001)
-        XCTAssertTrue(dimmer.isDimmed)
+        XCTAssertFalse(dimmer.isDimmed)
+        XCTAssertTrue(dimmer.hasDormantRestore)
 
         external.displays = [ExternalDisplayReference(selector: "2", name: "Monitor")]
         external.failWrites = true

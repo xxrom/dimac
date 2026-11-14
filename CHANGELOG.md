@@ -3,6 +3,17 @@
 ## Unreleased
 
 - Fixed a "Dimac" tooltip that could stay stuck on screen until the menu bar icon was clicked. The icon no longer has a tooltip.
+- Dimming never raises a display above the level it reads back. Monitors without brightness readback are still dimmed from the last level set in Dimac.
+- A monitor unplugged or unreachable while dimmed no longer keeps the app in a "dimmed" state with endless retries; it is restored when it reconnects.
+- When no display can be dimmed, Dimac waits a minute before trying again instead of launching `m1ddc` every few seconds.
+- Fixed a second, stray popup that could appear when the menu bar icon was clicked while the popup was closing, and ignored reopen requests in the first seconds after launch.
+- The timeout stepper no longer jumps from one minute to one second, and "0" or negative timeouts are rejected.
+- Copy, paste and typing now work in the popup and settings window; the settings window sizes itself to its content.
+- Launch at login shows when macOS approval is needed and opens Login Items to grant it.
+- A helper tool that hangs can no longer block the app beyond its timeout, and a failed `m1ddc display list` is reported instead of being read as "no monitors".
+- 0% is never saved as a monitor's normal brightness.
+- A corrupt saved dim snapshot is set aside and reported instead of being silently ignored; one bad per-display setting no longer erases the others.
+- Helper tool paths with stray spaces work; diagnostic log cleanup survives a damaged log line; local builds are stamped with their git revision.
 
 ## 0.1.3 - 2026-10-28
 

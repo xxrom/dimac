@@ -353,9 +353,17 @@ public final class DimmerController: ObservableObject {
                     }
                     current = value.luminance
                 } catch {
+                    // Monitors without DDC read support (writes work, reads never do) are dimmed from the
+                    // last level this app set or read successfully; it is the only baseline there is.
+                    // Without one the level is unknown and a dim write could brighten the display.
+                    if let level = manualExternalLevels[key] {
+                        externalCaptures.append((ExternalDisplaySnapshot(display: display, luminance: level), level))
+                        trace("dim.external.captured", ["display": DiagnosticLogger.encoded(display), "percent": level,
+                                                       "source": "manual fallback", "readError": error.localizedDescription])
+                        continue
+                    }
                     trace("dim.external.skipped", ["display": DiagnosticLogger.encoded(display),
                                                  "reason": "current level unknown; writing a dim level could brighten it",
-                                                 "savedLevel": manualExternalLevels[key] as Any? ?? NSNull(),
                                                  "error": error.localizedDescription])
                     snapshotErrors.append(error)
                     continue
@@ -369,6 +377,7 @@ public final class DimmerController: ObservableObject {
                     externalCaptures.append((ExternalDisplaySnapshot(display: display, luminance: current), current))
                     manualExternalLevels[key] = current
                     trace("dim.external.captured", ["display": DiagnosticLogger.encoded(display), "percent": current,
+                                                   "reading": DiagnosticLogger.encoded(ExternalDisplaySnapshot(display: display, luminance: current)),
                                                    "source": "live read"])
                 } else if let level = manualExternalLevels[key] {
                     externalCaptures.append((ExternalDisplaySnapshot(display: display, luminance: level), current))

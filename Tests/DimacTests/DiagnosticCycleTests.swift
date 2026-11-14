@@ -9,7 +9,7 @@ final class DiagnosticCycleTests: XCTestCase {
         let result = try emulate(staleAfterReconnect: false)
         XCTAssertEqual(result.physical, 70)
         XCTAssertEqual(result.restoreLevels, [70, 70])
-        XCTAssertTrue(result.events.contains { $0["event"] as? String == "restore.pending" })
+        XCTAssertTrue(result.events.contains { $0["event"] as? String == "restore.dormant" })
         XCTAssertTrue(result.events.contains { $0["event"] as? String == "snapshot.file.loaded" })
     }
 

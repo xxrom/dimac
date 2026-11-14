@@ -40,6 +40,7 @@ final class AppModel: ObservableObject {
     private let launchedAt: Date
     private let isLive: Bool
     private static let maximumIdleCheckInterval: TimeInterval = 60
+    private static let pausedIdleCheckInterval: TimeInterval = 5
     private var cancellables = Set<AnyCancellable>()
 
     init(
@@ -360,7 +361,11 @@ final class AppModel: ObservableObject {
         var interval: TimeInterval = 1
         if !isShowingSettings, !dimmer.needsFrequentIdleChecks {
             let remaining = settings.isEnabled ? TimeInterval(settings.idleTimeoutSeconds) - idleTime : .infinity
-            interval = min(max(remaining, 1), Self.maximumIdleCheckInterval)
+            // Past the timeout with nothing dimmed means dimming is paused (no dimmable display);
+            // check lazily instead of every second.
+            interval = remaining <= 0
+                ? Self.pausedIdleCheckInterval
+                : min(max(remaining, 1), Self.maximumIdleCheckInterval)
         }
         scheduleIdleCheck(after: interval)
     }
@@ -586,7 +591,7 @@ final class AppModel: ObservableObject {
                 for row in self.displayControlRows {
                     switch row.mode {
                     case .ddc(let display):
-                        result.externalDimPercentByDisplay[display.brightnessPreferenceKey] = row.dimPercent
+                        result.externalDimPercentByDisplay[display.dimPreferenceKey] = row.dimPercent
                         if let displayID = UInt32(row.preferenceKey.replacingOccurrences(of: "display:", with: "")) {
                             result.excludedInternalDisplayIDs.insert(displayID)
                         }
