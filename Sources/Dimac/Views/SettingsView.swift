@@ -10,6 +10,11 @@ struct SettingsView: View {
     @State private var timeoutInput = ""
     @State private var showAdvanced = false
     @State private var showHelp = false
+    /// Idle levels being dragged, keyed by row ID (or `allDisplaysDraftKey`); committed on release
+    /// so settings are not written to disk on every drag frame.
+    @State private var dimDrafts: [String: Double] = [:]
+
+    private static let allDisplaysDraftKey = "all"
 
     private static let displayTints: [Color] = [.blue, .teal, .purple, .pink, .mint]
 
@@ -34,11 +39,7 @@ struct SettingsView: View {
         .background(.ultraThinMaterial)
         .onAppear {
             timeoutInput = settings.timeoutText
-            model.settingsViewDidAppear()
             model.refreshExternalDisplays()
-        }
-        .onDisappear {
-            model.settingsViewDidDisappear()
         }
         .onChange(of: dimmer.isDimmed) { _ in
             model.refreshCurrentBrightness()
@@ -121,16 +122,17 @@ struct SettingsView: View {
                 accessibilityLabel: "Idle timeout"
             )
             CapsuleSlider(
-                value: Binding(
-                    get: { Double(settings.dimPercent) },
-                    set: { model.setDimPercent(Int($0.rounded())) }
-                ),
+                value: dimDraftBinding(Self.allDisplaysDraftKey, committed: settings.dimPercent),
                 range: 1...100,
                 systemImage: "moon.fill",
                 title: "Idle all",
-                valueText: "\(settings.dimPercent)%",
+                valueText: "\(dimDraftPercent(Self.allDisplaysDraftKey, committed: settings.dimPercent))%",
                 tint: .purple,
-                accessibilityLabel: "Idle brightness for all displays"
+                accessibilityLabel: "Idle brightness for all displays",
+                onEditingChanged: { editing in
+                    guard !editing else { return }
+                    commitDimDraft(Self.allDisplaysDraftKey) { model.setDimPercent($0) }
+                }
             )
             .help("Replaces every display's idle level")
         }
@@ -179,20 +181,38 @@ struct SettingsView: View {
             }
 
             CapsuleSlider(
-                value: Binding(
-                    get: { Double(row.dimPercent) },
-                    set: { model.setDisplayDimPercent(Int($0.rounded()), for: row.id) }
-                ),
+                value: dimDraftBinding(row.id, committed: row.dimPercent),
                 range: 1...100,
                 systemImage: "moon.fill",
                 title: "Idle",
-                valueText: "\(row.dimPercent)%",
+                valueText: "\(dimDraftPercent(row.id, committed: row.dimPercent))%",
                 tint: tint,
                 isEnabled: row.isControllable,
-                accessibilityLabel: "\(row.name) idle brightness"
+                accessibilityLabel: "\(row.name) idle brightness",
+                onEditingChanged: { editing in
+                    guard !editing else { return }
+                    commitDimDraft(row.id) { model.setDisplayDimPercent($0, for: row.id) }
+                }
             )
             .help("Brightness applied after the timeout. Never brightens a display.")
         }
+    }
+
+    private func dimDraftBinding(_ key: String, committed: Int) -> Binding<Double> {
+        Binding(
+            get: { dimDrafts[key] ?? Double(committed) },
+            set: { dimDrafts[key] = $0 }
+        )
+    }
+
+    private func dimDraftPercent(_ key: String, committed: Int) -> Int {
+        dimDrafts[key].map { Int($0.rounded()) } ?? committed
+    }
+
+    private func commitDimDraft(_ key: String, commit: (Int) -> Void) {
+        guard let draft = dimDrafts[key] else { return }
+        commit(Int(draft.rounded()))
+        dimDrafts[key] = nil
     }
 
     private var advancedToggle: some View {
@@ -239,6 +259,7 @@ struct SettingsView: View {
                             timeoutInput = settings.timeoutText
                         }
                         .help("Use values like 30s, 5m, or 2h")
+                        .accessibilityLabel("Exact idle timeout")
                     Stepper(
                         "",
                         onIncrement: { settings.incrementTimeout() },
@@ -246,6 +267,7 @@ struct SettingsView: View {
                     )
                     .labelsHidden()
                     .help("Adjust timeout")
+                    .accessibilityLabel("Adjust idle timeout")
                 }
                 row("Idle for") {
                     Text(model.idleTimeText)
@@ -256,9 +278,18 @@ struct SettingsView: View {
 
             card(title: "System", tint: .green, systemImage: "gearshape", compact: true) {
                 row("Launch at login") {
-                    Text(model.loginItemStatus)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    if model.loginItemNeedsApproval {
+                        Button("Approve…") {
+                            model.openLoginItemsSettings()
+                        }
+                        .buttonStyle(.borderless)
+                        .help("macOS needs your approval in System Settings > General > Login Items")
+                        .accessibilityLabel("Approve launch at login in System Settings")
+                    } else {
+                        Text(model.loginItemStatus)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                     Toggle("Launch at login", isOn: Binding(
                         get: { settings.launchAtLogin },
                         set: { model.setLaunchAtLogin($0) }
@@ -331,6 +362,7 @@ struct SettingsView: View {
                 .frame(width: 200)
                 .onSubmit { model.refreshExternalDisplays() }
                 .help("Press Return to refresh displays")
+                .accessibilityLabel("\(title) tool path")
         }
     }
 
@@ -515,6 +547,7 @@ private struct CurrentBrightnessSlider: View {
     let isControllable: Bool
     let apply: (Int) -> Int?
     @State private var draft: Double = 0
+    @State private var draftBeforeEditing: Double = 0
     @State private var isEditing = false
 
     var body: some View {
@@ -529,8 +562,13 @@ private struct CurrentBrightnessSlider: View {
             accessibilityLabel: "\(displayName) current brightness",
             onEditingChanged: { editing in
                 isEditing = editing
-                if !editing {
-                    draft = Double(apply(Int(draft.rounded())) ?? 0)
+                if editing {
+                    draftBeforeEditing = draft
+                } else if let applied = apply(Int(draft.rounded())) {
+                    draft = Double(applied)
+                } else {
+                    // Failed write to a display that cannot report its level: keep the previous value.
+                    draft = draftBeforeEditing
                 }
             }
         )

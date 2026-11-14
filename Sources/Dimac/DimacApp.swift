@@ -10,9 +10,43 @@ enum DimacApp {
         let delegate = AppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
+        app.mainMenu = makeMainMenu()
         withExtendedLifetime(delegate) {
             app.run()
         }
+    }
+
+    /// An accessory app shows no menu bar, but its main menu still handles key equivalents, so
+    /// this is what makes Cmd-C/V/X/A/Z and Cmd-Q work in the settings text fields.
+    @MainActor
+    static func makeMainMenu() -> NSMenu {
+        let mainMenu = NSMenu()
+
+        let appMenu = NSMenu(title: "Dimac")
+        appMenu.addItem(
+            withTitle: "Quit Dimac",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        let appMenuItem = NSMenuItem()
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let editMenuItem = NSMenuItem()
+        editMenuItem.title = "Edit"
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        return mainMenu
     }
 }
 

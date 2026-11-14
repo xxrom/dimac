@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var legacyAgentDetected = LegacyAgentDetector.isDetected
     @Published private(set) var loginItemStatus = LoginItemController.statusDescription
+    @Published private(set) var loginItemNeedsApproval = false
     @Published private(set) var idleTimeText = "0s"
     @Published private(set) var connectedExternalDisplayRows: [ConnectedDisplayRow] = []
     @Published private(set) var displayControlRows: [DisplayControlRow] = []
@@ -29,7 +30,15 @@ final class AppModel: ObservableObject {
     private lazy var settingsWindowController = SettingsWindowController(model: self)
     private var inputWakeMonitor: InputWakeMonitor?
     private var idleTimer: Timer?
-    private var visibleSettingsViews = 0
+    /// Settings surfaces currently on screen; a set so repeated show/close calls cannot drift.
+    private var visibleSettingsPresentations = Set<SettingsPresentation>()
+    private var lastActivityHandledAt = Date.distantPast
+    /// While a restore is pending, mouse moves arrive at display refresh rate; handle a few per second.
+    static let activityHandlingInterval: TimeInterval = 0.25
+    /// Reopen events this soon after launch come from a duplicate launch (e.g. at login), not the user.
+    static let reopenGracePeriod: TimeInterval = 2
+    private let launchedAt: Date
+    private let isLive: Bool
     private static let maximumIdleCheckInterval: TimeInterval = 60
     private var cancellables = Set<AnyCancellable>()
 
@@ -43,6 +52,8 @@ final class AppModel: ObservableObject {
     ) {
         self.displayProvider = displayProvider
         self.diagnostics = diagnostics
+        self.launchedAt = Date()
+        self.isLive = startAutomatically
         let settings = settings ?? SettingsStore()
         self.settings = settings
 
@@ -82,8 +93,7 @@ final class AppModel: ObservableObject {
 
     private func setUp() {
         NSApp.setActivationPolicy(.accessory)
-        loginItemStatus = LoginItemController.statusDescription
-        settings.launchAtLogin = LoginItemController.isEnabled
+        refreshLoginItemState()
 
         statusItemController.setVisible(!settings.hideMenuBarIcon)
         startIdleTimer()
@@ -218,8 +228,11 @@ final class AppModel: ObservableObject {
             displayControlRows[index].currentPercent = try? brightnessControls.read(row)
             if case .ddc(let display) = row.mode {
                 // A zero readback is what unresponsive DDC monitors report; keep the requested level instead.
+                // Never record 0 as the normal level either, or a later restore could leave the monitor dark.
                 let readback = displayControlRows[index].currentPercent.flatMap { $0 > 0 ? $0 : nil }
-                dimmer.recordManualExternalBrightness(readback ?? percent, for: display)
+                if let level = readback ?? (percent > 0 ? percent : nil) {
+                    dimmer.recordManualExternalBrightness(level, for: display)
+                }
             }
             diagnostics.record("ui.brightnessWriteAccepted", ["rowID": rowID, "requested": percent, "rowsAfter": diagnosticRows])
             dimmer.setStatus(displayControlRows[index].currentPercent == nil
@@ -235,13 +248,47 @@ final class AppModel: ObservableObject {
     func setLaunchAtLogin(_ enabled: Bool) {
         do {
             try LoginItemController.setEnabled(enabled)
-            settings.launchAtLogin = LoginItemController.isEnabled
-            loginItemStatus = LoginItemController.statusDescription
-            dimmer.setStatus(enabled ? "Launch at login enabled" : "Launch at login disabled")
+            refreshLoginItemState()
+            if enabled, loginItemNeedsApproval {
+                dimmer.setStatus("Approve Dimac in Login Items")
+                LoginItemController.openSystemSettings()
+            } else if enabled {
+                dimmer.setStatus(LoginItemController.isEnabled ? "Launch at login enabled" : "Launch at login unavailable")
+            } else {
+                dimmer.setStatus("Launch at login disabled")
+            }
         } catch {
-            settings.launchAtLogin = LoginItemController.isEnabled
-            loginItemStatus = LoginItemController.statusDescription
+            refreshLoginItemState()
             dimmer.setStatus("Login item failed", error: error.localizedDescription)
+        }
+    }
+
+    func openLoginItemsSettings() {
+        LoginItemController.openSystemSettings()
+    }
+
+    /// The toggle shows the registration (on while waiting for approval); the status text says
+    /// whether macOS will actually launch Dimac.
+    private func refreshLoginItemState() {
+        let status = LoginItemController.status
+        loginItemStatus = LoginItemController.statusDescription(for: status)
+        loginItemNeedsApproval = status == .requiresApproval
+        let registered = LoginItemController.isRegistered(status)
+        if settings.launchAtLogin != registered {
+            settings.launchAtLogin = registered
+        }
+    }
+
+    /// Re-reads state that can change outside Dimac while it runs.
+    private func refreshSystemState() {
+        refreshLoginItemState()
+        let legacy = LegacyAgentDetector.isDetected
+        if legacyAgentDetected != legacy {
+            legacyAgentDetected = legacy
+        }
+        // Input Monitoring may have been granted since launch; start the wake monitor without waiting for wake.
+        if inputWakeMonitor == nil, EventListeningPermission.isTrusted {
+            startInputWakeMonitor()
         }
     }
 
@@ -274,11 +321,25 @@ final class AppModel: ObservableObject {
     }
 
     func handleReopen() {
+        guard Self.shouldHandleReopen(launchedAt: launchedAt, now: Date()) else {
+            diagnostics.record("ui.reopenIgnored", ["reason": "launch grace period"])
+            return
+        }
         if settings.hideMenuBarIcon {
             showSettingsWindow()
         } else {
+            // Falls back to the settings window when the status item is not usable.
             statusItemController.showPopover()
         }
+    }
+
+    static func shouldHandleReopen(launchedAt: Date, now: Date) -> Bool {
+        now.timeIntervalSince(launchedAt) >= reopenGracePeriod
+    }
+
+    static func shouldHandleActivity(lastHandledAt: Date, now: Date) -> Bool {
+        let elapsed = now.timeIntervalSince(lastHandledAt)
+        return elapsed >= activityHandlingInterval || elapsed < 0
     }
 
     private func startIdleTimer() {
@@ -290,14 +351,14 @@ final class AppModel: ObservableObject {
     /// timeout could next elapse, since idle time cannot grow faster than the wall clock.
     private func checkIdleTime() {
         let idleTime = idleReader.idleTime()
-        if visibleSettingsViews > 0 {
+        if isShowingSettings {
             let text = Self.formatIdleTime(idleTime)
             if text != idleTimeText { idleTimeText = text }
         }
         dimmer.handleIdleTime(idleTime)
 
         var interval: TimeInterval = 1
-        if visibleSettingsViews == 0, !dimmer.needsFrequentIdleChecks {
+        if !isShowingSettings, !dimmer.needsFrequentIdleChecks {
             let remaining = settings.isEnabled ? TimeInterval(settings.idleTimeoutSeconds) - idleTime : .infinity
             interval = min(max(remaining, 1), Self.maximumIdleCheckInterval)
         }
@@ -314,13 +375,21 @@ final class AppModel: ObservableObject {
         idleTimer = timer
     }
 
-    func settingsViewDidAppear() {
-        visibleSettingsViews += 1
-        startIdleTimer()
+    var isShowingSettings: Bool {
+        !visibleSettingsPresentations.isEmpty
     }
 
-    func settingsViewDidDisappear() {
-        visibleSettingsViews = max(0, visibleSettingsViews - 1)
+    /// Called by the popover and window controllers when they show or close settings. Repeated
+    /// calls for the same presentation are ignored, so the count cannot get stuck.
+    func setSettingsPresentation(_ presentation: SettingsPresentation, visible: Bool) {
+        if visible {
+            guard visibleSettingsPresentations.insert(presentation).inserted else { return }
+            guard isLive else { return }
+            refreshSystemState()
+            startIdleTimer()
+        } else {
+            visibleSettingsPresentations.remove(presentation)
+        }
     }
 
     private func startInputWakeMonitor() {
@@ -336,6 +405,10 @@ final class AppModel: ObservableObject {
         let monitor = InputWakeMonitor { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.dimmer.isDimmed else { return }
+                // The first event after dimming is always handled; repeats while a restore is pending are throttled.
+                let now = Date()
+                guard AppModel.shouldHandleActivity(lastHandledAt: self.lastActivityHandledAt, now: now) else { return }
+                self.lastActivityHandledAt = now
                 self.dimmer.handleUserActivity()
                 self.startIdleTimer()
             }
@@ -577,6 +650,11 @@ final class AppModel: ObservableObject {
             return fields
         }
     }
+}
+
+enum SettingsPresentation: Hashable {
+    case popover
+    case window
 }
 
 enum DisplayControlMode: Equatable {
