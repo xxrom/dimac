@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- No changes yet.
+
+## 0.1.4 - 2026-11-15
+
 - Fixed a "Dimac" tooltip that could stay stuck on screen until the menu bar icon was clicked. The icon no longer has a tooltip.
 - Dimming never raises a display above the level it reads back. Monitors without brightness readback are still dimmed from the last level set in Dimac.
 - A monitor unplugged or unreachable while dimmed no longer keeps the app in a "dimmed" state with endless retries; it is restored when it reconnects.
