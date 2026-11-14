@@ -27,4 +27,18 @@ final class DimmerSettingsTests: XCTestCase {
         XCTAssertEqual(settings.externalBrightnessByDisplay["ok"], 55)
         XCTAssertEqual(settings.externalBrightnessByDisplay["high"], 100)
     }
+
+    func testExternalDimPercentPrefersUUIDKeyThenLegacyKeyThenGlobal() {
+        let first = ExternalDisplayReference(selector: "1", name: "Dell", uuid: "11111111-1111-1111-1111-111111111111")
+        let second = ExternalDisplayReference(selector: "2", name: "Dell", uuid: "22222222-2222-2222-2222-222222222222")
+        let other = ExternalDisplayReference(selector: "3", name: "LG")
+        XCTAssertFalse(first.dimPreferenceKey == second.dimPreferenceKey)
+        XCTAssertEqual(first.brightnessPreferenceKey, "name:dell")
+        XCTAssertEqual(other.dimPreferenceKey, other.brightnessPreferenceKey)
+
+        let settings = DimmerSettings(dimPercent: 10, externalDimPercentByDisplay: ["name:dell": 25, first.dimPreferenceKey: 40])
+        XCTAssertEqual(settings.externalDimPercent(for: first), 40)
+        XCTAssertEqual(settings.externalDimPercent(for: second), 25)
+        XCTAssertEqual(settings.externalDimPercent(for: other), 10)
+    }
 }

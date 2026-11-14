@@ -6,6 +6,20 @@ public protocol SnapshotPersisting {
     func clear() throws
 }
 
+public enum SnapshotStoreError: LocalizedError, Equatable {
+    /// The saved dim snapshot could not be decoded; it was renamed to `quarantinedAt` when that succeeded.
+    case corruptSnapshot(quarantinedAt: URL?)
+
+    public var errorDescription: String? {
+        switch self {
+        case .corruptSnapshot(let url):
+            let location = url.map { " It was moved to \($0.lastPathComponent)." } ?? ""
+            return "The saved dim snapshot was unreadable, so original brightness could not be restored; "
+                + "set brightness manually if a display is still dim.\(location)"
+        }
+    }
+}
+
 public final class FileSnapshotStore: SnapshotPersisting {
     private let fileURL: URL
     private let encoder = JSONEncoder()
@@ -35,14 +49,46 @@ public final class FileSnapshotStore: SnapshotPersisting {
             return nil
         }
 
+        let data: Data
         do {
-            let data = try Data(contentsOf: fileURL)
+            data = try Data(contentsOf: fileURL)
+        } catch {
+            diagnostics.record("snapshot.file.loadFailed", ["path": fileURL.path, "error": error.localizedDescription])
+            throw error
+        }
+
+        do {
             let snapshot = try decoder.decode(BrightnessSnapshot.self, from: data)
             diagnostics.record("snapshot.file.loaded", ["path": fileURL.path, "snapshot": DiagnosticLogger.encoded(snapshot)])
             return snapshot
         } catch {
-            diagnostics.record("snapshot.file.loadFailed", ["path": fileURL.path, "error": error.localizedDescription])
-            throw error
+            // Move the unreadable file aside so it is kept for inspection but no longer blocks saving a new
+            // snapshot, and tell the caller the saved brightness was lost rather than "no snapshot".
+            let quarantined = quarantineCorruptFile()
+            diagnostics.record("snapshot.file.corrupt", ["path": fileURL.path, "error": error.localizedDescription,
+                                                         "quarantinedAt": quarantined?.path ?? NSNull()])
+            throw SnapshotStoreError.corruptSnapshot(quarantinedAt: quarantined)
+        }
+    }
+
+    private func quarantineCorruptFile() -> URL? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let base = fileURL.deletingPathExtension().lastPathComponent
+        let directory = fileURL.deletingLastPathComponent()
+        var destination = directory.appendingPathComponent("\(base).corrupt-\(formatter.string(from: Date())).json")
+        var suffix = 1
+        while FileManager.default.fileExists(atPath: destination.path) {
+            suffix += 1
+            destination = directory.appendingPathComponent("\(base).corrupt-\(formatter.string(from: Date()))-\(suffix).json")
+        }
+        do {
+            try FileManager.default.moveItem(at: fileURL, to: destination)
+            return destination
+        } catch {
+            diagnostics.record("snapshot.file.quarantineFailed", ["path": fileURL.path, "error": error.localizedDescription])
+            return nil
         }
     }
 

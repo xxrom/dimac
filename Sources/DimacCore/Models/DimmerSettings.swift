@@ -30,6 +30,14 @@ public struct DimmerSettings: Encodable, Equatable, Sendable {
         self.excludedInternalDisplayIDs = excludedInternalDisplayIDs
     }
 
+    /// The dim level for an external display. Prefers the UUID-specific key so identical monitors can
+    /// differ, then the older name/selector key, then the global dim level.
+    public func externalDimPercent(for display: ExternalDisplayReference) -> Int {
+        externalDimPercentByDisplay[display.dimPreferenceKey]
+            ?? externalDimPercentByDisplay[display.brightnessPreferenceKey]
+            ?? dimPercent
+    }
+
     public static func clampedPercent(_ value: Int) -> Int {
         min(100, max(1, value))
     }

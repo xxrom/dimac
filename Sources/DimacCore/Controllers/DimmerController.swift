@@ -33,17 +33,34 @@ public final class DimmerController: ObservableObject {
 
     /// Recovery keys seen by the last discovery; `nil` until the first discovery after launch.
     private var knownExternalKeys: Set<String>?
+    /// Set when the last discovery threw; an empty result straight after a failure is not trusted as
+    /// "every display was unplugged", so saved levels and known displays are kept.
+    private var lastDiscoveryFailed = false
     /// Until these dates, hardware readings for a display are treated as untrustworthy (reconnect/wake).
     private var untrustedReadingsUntil: [String: Date] = [:]
     /// Displays whose readback disagreed with the level just written; their readings are ignored as baselines.
     private var unreliableReadbackKeys: Set<String> = []
     /// Displays that reconnected or woke while dimmed; they must receive the saved level on restore.
+    /// Only keys of displays held in the active snapshot are kept.
     private var reconnectedWhileDimmed: Set<String> = []
     private var recoveryGeneration = 0
+    /// The recovery run that currently owns each display, so a new run for one display does not cancel
+    /// the verification of another.
+    private var recoveryGenerationByKey: [String: Int] = [:]
 
     nonisolated public static let externalRecoveryDelays: [TimeInterval] = [2, 5, 10, 20, 40]
     private static let untrustedReadingWindow: TimeInterval = 120
     private static let recoveryRestoreReasons: Set<String> = ["wake", "display reconnect", "retry", "saved snapshot"]
+    /// Interval between frequent restore retries while a display is still held dim.
+    private static let restoreRetryInterval: TimeInterval = 5
+    /// After this many failed attempts in a row, external-only failures stop being retried frequently.
+    private static let maxFrequentRestoreAttempts = 6
+    /// Retry interval for displays that are absent or unreachable (besides display-change events).
+    private static let dormantRestoreRetryInterval: TimeInterval = 300
+    /// How long to wait before trying again after nothing could be dimmed (unless displays change).
+    private static let noDimmableDisplaysRetryInterval: TimeInterval = 60
+    /// DDC readbacks are often quantized; a readback this close to the written level counts as a match.
+    private static let readbackTolerance = 2
 
     nonisolated public static func mainQueueScheduler(_ delay: TimeInterval, _ work: @escaping @MainActor () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
@@ -52,8 +69,15 @@ public final class DimmerController: ObservableObject {
     }
 
     public func recordManualExternalBrightness(_ percent: Int, for display: ExternalDisplayReference) {
-        manualExternalLevels[display.recoveryKey] = min(100, max(0, percent))
-        untrustedReadingsUntil[display.recoveryKey] = nil
+        let key = display.recoveryKey
+        guard percent > 0 else {
+            // Zero is not a usable normal level: restoring it would leave the monitor dark.
+            trace("manual.externalBaselineIgnored", ["display": DiagnosticLogger.encoded(display), "percent": percent])
+            return
+        }
+        manualExternalLevels[key] = min(100, percent)
+        untrustedReadingsUntil[key] = nil
+        unreliableReadbackKeys.remove(key)
         trace("manual.externalBaseline", ["display": DiagnosticLogger.encoded(display), "percent": percent])
     }
 
@@ -77,6 +101,16 @@ public final class DimmerController: ObservableObject {
     private var lastDimAttemptAt = Date.distantPast
     private var lastRestoreAttemptAt = Date.distantPast
     private var restoreRequested = false
+    /// The active snapshot only holds displays that are absent or unreachable. They are restored on a
+    /// display change or at a long interval, without keeping the app in its dimmed/frequent-poll state.
+    private var dormantRestore = false
+    private var consecutiveRestoreFailures = 0
+    /// After nothing could be dimmed, idle-driven dim attempts wait until this date (or a display change).
+    private var dimBackoffUntil: Date?
+    /// The snapshot file could not be deleted after a restore; it must not be loaded and restored again.
+    private var snapshotClearPending = false
+    /// An error that plain status updates must not hide (an unreadable saved snapshot).
+    private var persistentError: String?
     private var lastIdleLogAt = Date.distantPast
 
     public init(
@@ -99,9 +133,9 @@ public final class DimmerController: ObservableObject {
         self.levelStore = levelStore
         self.recoveryDelays = recoveryDelays
         self.scheduler = scheduler
-        manualExternalLevels = (levelStore?.loadLevels() ?? [:]).filter { $0.key.hasPrefix("uuid:") }
+        manualExternalLevels = (levelStore?.loadLevels() ?? [:]).filter { $0.key.hasPrefix("uuid:") && $0.value > 0 }
 
-        if let snapshot = try? snapshotStore.load() {
+        if let snapshot = loadPersistedSnapshot() {
             activeSnapshot = snapshot
             if snapshot.appliedInternalDisplays != nil || snapshot.appliedExternalDisplays != nil {
                 appliedDimSnapshot = BrightnessSnapshot(
@@ -120,6 +154,17 @@ public final class DimmerController: ObservableObject {
         isDimmed || restoreRequested
     }
 
+    /// True while the saved snapshot only holds displays that are disconnected or unreachable; they are
+    /// restored when displays change (`refreshExternalDisplays`) or at a long interval.
+    public var hasDormantRestore: Bool {
+        dormantRestore
+    }
+
+    /// When set, idle-driven dimming is paused until this date because nothing could be dimmed.
+    public var dimRetryNotBefore: Date? {
+        dimBackoffUntil
+    }
+
     public func handleIdleTime(_ idleTime: TimeInterval, applyHardware: Bool = true) {
         let settings = settingsProvider()
         if now().timeIntervalSince(lastIdleLogAt) >= 10 || (idleTime < 1 && isDimmed && !restoreRequested) {
@@ -127,9 +172,12 @@ public final class DimmerController: ObservableObject {
             trace("idle.observed", ["idleSeconds": idleTime, "settings": DiagnosticLogger.encoded(settings)])
         }
 
-        if restoreRequested, now().timeIntervalSince(lastRestoreAttemptAt) >= 5 {
+        if restoreRequested, now().timeIntervalSince(lastRestoreAttemptAt) >= Self.restoreRetryInterval {
             restoreNow(reason: "retry", applyHardware: applyHardware)
             if !isDimmed { return }
+        } else if dormantRestore, now().timeIntervalSince(lastRestoreAttemptAt) >= Self.dormantRestoreRetryInterval {
+            restoreNow(reason: "retry", applyHardware: applyHardware)
+            if isDimmed { return }
         }
 
         guard settings.isEnabled else {
@@ -139,7 +187,15 @@ public final class DimmerController: ObservableObject {
             return
         }
 
+        if idleTime < TimeInterval(settings.idleTimeoutSeconds), dimBackoffUntil != nil {
+            // The user came back; the next idle period may try once more.
+            dimBackoffUntil = nil
+        }
+
         if idleTime >= TimeInterval(settings.idleTimeoutSeconds), !isDimmed || restoreRequested {
+            if let until = dimBackoffUntil, now() < until {
+                return
+            }
             dimNow(applyHardware: applyHardware)
         } else if idleTime < 1, isDimmed {
             handleUserActivity(applyHardware: applyHardware)
@@ -151,20 +207,19 @@ public final class DimmerController: ObservableObject {
             return
         }
 
-        if !restoreRequested || now().timeIntervalSince(lastRestoreAttemptAt) >= 5 {
+        if !restoreRequested || now().timeIntervalSince(lastRestoreAttemptAt) >= Self.restoreRetryInterval {
             restoreNow(reason: "activity", applyHardware: applyHardware)
         }
     }
 
     @discardableResult
     public func refreshExternalDisplays() -> [ExternalDisplayReference] {
+        // Display changes can make something dimmable again.
+        dimBackoffUntil = nil
         do {
             let displays = try externalBrightness.discoverDisplays()
             trace("displays.discovered", ["displays": DiagnosticLogger.encoded(displays)])
-            let connected = Dictionary(grouping: displays, by: \.recoveryKey)
-            manualExternalLevels = manualExternalLevels.filter {
-                connected[$0.key]?.count == 1 || ($0.key.hasPrefix("uuid:") && connected[$0.key] == nil)
-            }
+            let confirmed = recordDiscoverySucceeded(displays)
             externalDisplayCount = displays.count
             let appeared = displays.filter { !(knownExternalKeys?.contains($0.recoveryKey) ?? false) }
             if !appeared.isEmpty {
@@ -172,22 +227,30 @@ public final class DimmerController: ObservableObject {
                                             "firstDiscovery": knownExternalKeys == nil])
                 distrustReadings(for: appeared)
             }
-            knownExternalKeys = Set(displays.map(\.recoveryKey))
+            if confirmed {
+                knownExternalKeys = Set(displays.map(\.recoveryKey))
+            }
             defer {
                 if !appeared.isEmpty {
                     scheduleExternalBrightnessRecovery(reason: "display appeared", displays: appeared)
                 }
             }
-            if restoreRequested {
+            if restoreRequested || dormantRestore {
+                if dormantRestore {
+                    // A display event gets a fresh burst of retries: a monitor that just came back often
+                    // ignores the first writes.
+                    consecutiveRestoreFailures = 0
+                }
                 restoreNow(reason: "display reconnect")
             } else if !isDimmed {
                 statusMessage = displays.isEmpty
                     ? "No DDC external displays found"
                     : "Found \(displays.count) DDC display\(displays.count == 1 ? "" : "s")"
-                lastError = nil
+                lastError = persistentError
             }
             return displays
         } catch {
+            recordDiscoveryFailed(error)
             externalDisplayCount = 0
             report(error)
             return []
@@ -196,7 +259,7 @@ public final class DimmerController: ObservableObject {
 
     public func setStatus(_ message: String, error: String? = nil) {
         statusMessage = message
-        lastError = error
+        lastError = error ?? persistentError
         trace("status.changed", ["message": message, "error": error ?? ""])
     }
 
@@ -242,7 +305,7 @@ public final class DimmerController: ObservableObject {
 
         do {
             var snapshotErrors: [Error] = []
-            let pending = restoreRequested ? activeSnapshot : nil
+            let pending = (restoreRequested || dormantRestore) ? activeSnapshot : nil
 
             let internalSnapshot: [InternalDisplaySnapshot]
             do {
@@ -258,16 +321,17 @@ public final class DimmerController: ObservableObject {
             let externalDisplays: [ExternalDisplayReference]
             do {
                 externalDisplays = try externalBrightness.discoverDisplays()
+                recordDiscoverySucceeded(externalDisplays)
             } catch {
+                recordDiscoveryFailed(error)
                 snapshotErrors.append(error)
                 externalDisplays = []
             }
 
             let discoveredByKey = Dictionary(grouping: externalDisplays, by: \.recoveryKey)
-            manualExternalLevels = manualExternalLevels.filter {
-                discoveredByKey[$0.key]?.count == 1 || ($0.key.hasPrefix("uuid:") && discoveredByKey[$0.key] == nil)
-            }
-            var externalSnapshot: [ExternalDisplaySnapshot] = []
+            /// Baselines to restore later, each with the live level read just now. Dimming targets never
+            /// exceed the live level, so a dim can never brighten a display.
+            var externalCaptures: [(baseline: ExternalDisplaySnapshot, current: Int)] = []
             for display in externalDisplays {
                 if pending?.externalDisplays.contains(where: { display.matchesRecoveryIdentity(of: $0.display) }) == true {
                     trace("dim.external.skipped", ["display": DiagnosticLogger.encoded(display), "reason": "pending restore retained"])
@@ -280,54 +344,53 @@ public final class DimmerController: ObservableObject {
                     snapshotErrors.append(BrightnessError.readFailed("an external display with an ambiguous identity"))
                     continue
                 }
+                let current: Int
                 do {
-                    if let level = manualExternalLevels[key], !canTrustReadings(for: key) {
-                        externalSnapshot.append(ExternalDisplaySnapshot(display: display, luminance: level))
-                        trace("dim.external.captured", ["display": DiagnosticLogger.encoded(display), "percent": level,
-                                                       "source": "saved level", "reason": "display readings untrusted"])
-                        continue
-                    }
                     let captured = try externalBrightness.currentSnapshot(for: [display])
                     guard captured.count == 1, let value = captured.first,
                           value.display.recoveryKey == key else {
                         throw BrightnessError.readFailed(display.name)
                     }
-                    guard isTrustedReading(value.luminance, for: key) else {
-                        trace("dim.external.readingRejected", ["reading": DiagnosticLogger.encoded(value),
-                                                              "reason": "implausible or untrusted reading"])
-                        if let level = manualExternalLevels[key] {
-                            externalSnapshot.append(ExternalDisplaySnapshot(display: display, luminance: level))
-                            trace("dim.external.captured", ["display": DiagnosticLogger.encoded(display), "percent": level,
-                                                           "source": "saved level", "reason": "live reading rejected"])
-                        } else {
-                            trace("dim.external.skipped", ["display": DiagnosticLogger.encoded(display),
-                                                         "reason": "no baseline; reading is not a usable brightness"])
-                        }
-                        continue
-                    }
-                    externalSnapshot.append(value)
-                    trace("dim.external.captured", ["reading": DiagnosticLogger.encoded(value), "source": "live read"])
-                    manualExternalLevels[key] = value.luminance
+                    current = value.luminance
                 } catch {
-                    if let level = manualExternalLevels[key] {
-                        externalSnapshot.append(ExternalDisplaySnapshot(display: display, luminance: level))
-                        trace("dim.external.captured", ["display": DiagnosticLogger.encoded(display), "percent": level,
-                                                       "source": "manual fallback", "readError": error.localizedDescription])
-                    } else {
-                        trace("dim.external.skipped", ["display": DiagnosticLogger.encoded(display),
-                                                     "reason": "no baseline", "error": error.localizedDescription])
-                        snapshotErrors.append(error)
-                    }
+                    trace("dim.external.skipped", ["display": DiagnosticLogger.encoded(display),
+                                                 "reason": "current level unknown; writing a dim level could brighten it",
+                                                 "savedLevel": manualExternalLevels[key] as Any? ?? NSNull(),
+                                                 "error": error.localizedDescription])
+                    snapshotErrors.append(error)
+                    continue
+                }
+                guard current > 0 else {
+                    trace("dim.external.skipped", ["display": DiagnosticLogger.encoded(display), "reading": current,
+                                                 "reason": "reading is not a usable brightness; current level unknown"])
+                    continue
+                }
+                if isTrustedReading(current, for: key) {
+                    externalCaptures.append((ExternalDisplaySnapshot(display: display, luminance: current), current))
+                    manualExternalLevels[key] = current
+                    trace("dim.external.captured", ["display": DiagnosticLogger.encoded(display), "percent": current,
+                                                   "source": "live read"])
+                } else if let level = manualExternalLevels[key] {
+                    externalCaptures.append((ExternalDisplaySnapshot(display: display, luminance: level), current))
+                    trace("dim.external.captured", ["display": DiagnosticLogger.encoded(display), "percent": level,
+                                                   "current": current, "source": "saved level",
+                                                   "reason": "display readings untrusted"])
                 }
             }
+            let externalSnapshot = externalCaptures.map(\.baseline)
 
             guard !internalSnapshot.isEmpty || !externalSnapshot.isEmpty else {
+                dimBackoffUntil = attemptTime.addingTimeInterval(Self.noDimmableDisplaysRetryInterval)
+                trace("dim.nothingToDim", ["retryAfter": DiagnosticLogger.encoded(dimBackoffUntil)])
                 if pending != nil { return }
                 statusMessage = "No displays available to dim"
-                lastError = snapshotErrors.first.map {
-                    ($0 as? LocalizedError)?.errorDescription ?? $0.localizedDescription
-                }
+                lastError = snapshotErrors.first.map(Self.describe) ?? persistentError
                 return
+            }
+
+            if pending == nil {
+                reconnectedWhileDimmed.removeAll()
+                consecutiveRestoreFailures = 0
             }
 
             let internalDimSnapshot = internalSnapshot.map { display in
@@ -338,13 +401,11 @@ public final class DimmerController: ObservableObject {
                 )
             }
 
-            let externalDimSnapshot = externalSnapshot.map { display in
-                let percent = settings.externalDimPercentByDisplay[
-                    display.display.brightnessPreferenceKey
-                ] ?? settings.dimPercent
+            let externalDimSnapshot = externalCaptures.map { capture in
+                let percent = settings.externalDimPercent(for: capture.baseline.display)
                 return ExternalDisplaySnapshot(
-                    display: display.display,
-                    luminance: min(display.luminance, percent)
+                    display: capture.baseline.display,
+                    luminance: min(capture.baseline.luminance, percent, capture.current)
                 )
             }
 
@@ -352,11 +413,14 @@ public final class DimmerController: ObservableObject {
                 internalDisplays: (pending?.internalDisplays ?? []) + internalSnapshot,
                 externalDisplays: (pending?.externalDisplays ?? []) + externalSnapshot,
                 appliedInternalDisplays: applyHardware ? (pending?.appliedInternalDisplays ?? []) + internalDimSnapshot : nil,
-                appliedExternalDisplays: applyHardware ? pending?.appliedExternalDisplays ?? [] : nil
+                appliedExternalDisplays: applyHardware ? pending?.appliedExternalDisplays ?? [] : nil,
+                createdAt: pending?.createdAt ?? attemptTime,
+                appVersion: BrightnessSnapshot.currentAppVersion
             )
             trace("dim.snapshotPrepared", ["snapshot": DiagnosticLogger.encoded(snapshot),
                                            "externalTargets": DiagnosticLogger.encoded(externalDimSnapshot)])
             try snapshotStore.save(snapshot)
+            snapshotClearPending = false
             activeSnapshot = snapshot
 
             var writeErrors: [Error] = []
@@ -402,6 +466,12 @@ public final class DimmerController: ObservableObject {
             activeSnapshot = snapshot
             isDimmed = true
             restoreRequested = false
+            dormantRestore = false
+            dimBackoffUntil = nil
+            persistentError = nil
+            reconnectedWhileDimmed = reconnectedWhileDimmed.filter { key in
+                snapshot.externalDisplays.contains { $0.display.recoveryKey == key }
+            }
             do {
                 try snapshotStore.save(snapshot)
             } catch {
@@ -424,8 +494,20 @@ public final class DimmerController: ObservableObject {
 
     public func restoreNow(reason: String = "manual", applyHardware: Bool = true) {
         trace("restore.requested", ["reason": reason, "applyHardware": applyHardware])
-        guard let snapshot = activeSnapshot ?? (try? snapshotStore.load()) else {
+        var snapshot = activeSnapshot
+        if snapshot == nil {
+            if snapshotClearPending {
+                // The in-memory state is authoritative: the leftover file describes a restore that already
+                // happened, so it must not be replayed.
+                retryPendingSnapshotClear()
+            } else {
+                snapshot = loadPersistedSnapshot()
+            }
+        }
+        guard let snapshot else {
             isDimmed = false
+            restoreRequested = false
+            dormantRestore = false
             trace("restore.noSnapshot", ["reason": reason])
             return
         }
@@ -448,7 +530,10 @@ public final class DimmerController: ObservableObject {
 
         var errors: [Error] = []
         var failedInternal: [InternalDisplaySnapshot] = []
-        var failedExternal: [ExternalDisplaySnapshot] = []
+        /// External displays to retry soon: discovery failed or the write failed.
+        var retryExternal: [ExternalDisplaySnapshot] = []
+        /// External displays that are not connected (or not uniquely identifiable) right now.
+        var absentExternal: [ExternalDisplaySnapshot] = []
         var restoredExternal: [ExternalDisplayReference] = []
 
         if applyHardware {
@@ -456,7 +541,8 @@ public final class DimmerController: ObservableObject {
                 snapshot.externalDisplays
             )
             errors.append(contentsOf: resolution.errors)
-            failedExternal = resolution.pending
+            retryExternal = resolution.retry
+            absentExternal = resolution.absent
             let resolvedSnapshot = BrightnessSnapshot(
                 internalDisplays: snapshot.internalDisplays,
                 externalDisplays: resolution.resolved
@@ -488,12 +574,20 @@ public final class DimmerController: ObservableObject {
                 } catch {
                     trace("restore.external.writeFailed", ["target": DiagnosticLogger.encoded(externalSnapshot), "error": error.localizedDescription])
                     errors.append(error)
-                    failedExternal.append(externalSnapshot)
+                    retryExternal.append(externalSnapshot)
                 }
             }
         }
 
-        if let firstError = errors.first {
+        // A display that just reconnected or woke may accept the DDC write before it is ready and keep
+        // its power-on brightness, so re-send and verify the saved level a few times. This is decided per
+        // display: one display failing must not skip verification of the ones that were written.
+        let needsVerification = restoredExternal.filter {
+            Self.recoveryRestoreReasons.contains(reason) || reconnectedWhileDimmed.contains($0.recoveryKey)
+        }
+
+        let failedExternal = retryExternal + absentExternal
+        if !failedInternal.isEmpty || !failedExternal.isEmpty {
             let remaining = BrightnessSnapshot(
                 internalDisplays: failedInternal,
                 externalDisplays: failedExternal,
@@ -508,43 +602,80 @@ public final class DimmerController: ObservableObject {
                 createdAt: snapshot.createdAt,
                 appVersion: snapshot.appVersion
             )
-            if !remaining.isEmpty {
-                activeSnapshot = remaining
-                do {
-                    try snapshotStore.save(remaining)
-                } catch {
-                    report(error)
-                    statusMessage = "Restore pending; snapshot update failed"
-                    return
-                }
+            activeSnapshot = remaining
+            if let applied = appliedDimSnapshot {
+                appliedDimSnapshot = BrightnessSnapshot(
+                    internalDisplays: remaining.appliedInternalDisplays ?? [],
+                    externalDisplays: remaining.appliedExternalDisplays ?? [],
+                    createdAt: applied.createdAt,
+                    appVersion: applied.appVersion
+                )
             }
-            report(firstError)
-            statusMessage = "Restore failed; will retry"
-            trace("restore.pending", ["error": firstError.localizedDescription])
-        } else {
+            reconnectedWhileDimmed = reconnectedWhileDimmed.filter { key in
+                failedExternal.contains { $0.display.recoveryKey == key }
+            }
+
+            let onlyAbsent = failedInternal.isEmpty && retryExternal.isEmpty
+            consecutiveRestoreFailures += 1
+            let externalOnlyGivenUp = failedInternal.isEmpty
+                && consecutiveRestoreFailures >= Self.maxFrequentRestoreAttempts
+            if onlyAbsent || externalOnlyGivenUp {
+                // Nothing that is connected and reachable is still dim, so stop the dimmed state and the
+                // frequent retries; the remaining displays are restored on a display change or later.
+                isDimmed = false
+                restoreRequested = false
+                dormantRestore = true
+                if onlyAbsent {
+                    let count = absentExternal.count
+                    statusMessage = "Restored; \(count) disconnected display\(count == 1 ? "" : "s") will be restored on reconnect"
+                    lastError = persistentError
+                } else if let firstError = errors.first {
+                    report(firstError)
+                    statusMessage = "Restore paused; will retry when displays change"
+                }
+                trace("restore.dormant", ["reason": reason, "absent": DiagnosticLogger.encoded(absentExternal),
+                                          "retry": DiagnosticLogger.encoded(retryExternal),
+                                          "attempts": consecutiveRestoreFailures])
+            } else {
+                isDimmed = true
+                dormantRestore = false
+                if let firstError = errors.first {
+                    report(firstError)
+                }
+                statusMessage = "Restore failed; will retry"
+                trace("restore.pending", ["error": errors.first?.localizedDescription ?? "",
+                                          "attempts": consecutiveRestoreFailures])
+            }
             do {
-                try snapshotStore.clear()
+                try snapshotStore.save(remaining)
             } catch {
                 report(error)
-                statusMessage = "Restored, but snapshot cleanup failed"
-                return
+                statusMessage = "Restore pending; snapshot update failed"
             }
+        } else {
+            // Update the in-memory state first: the displays are restored even if the file cannot be removed.
             activeSnapshot = nil
             appliedDimSnapshot = nil
             isDimmed = false
             restoreRequested = false
-            statusMessage = "Restored from \(reason)"
-            lastError = nil
-            trace("restore.finished", ["reason": reason])
+            dormantRestore = false
+            consecutiveRestoreFailures = 0
+            reconnectedWhileDimmed.removeAll()
+            persistentError = nil
+            do {
+                try snapshotStore.clear()
+                snapshotClearPending = false
+                statusMessage = "Restored from \(reason)"
+                lastError = nil
+                trace("restore.finished", ["reason": reason])
+            } catch {
+                snapshotClearPending = true
+                report(error)
+                statusMessage = "Restored, but snapshot cleanup failed"
+            }
         }
 
-        // A display that just reconnected or woke may accept the DDC write before it is ready and keep
-        // its power-on brightness, so re-send and verify the saved level a few times.
-        let needsVerification = restoredExternal.filter {
-            Self.recoveryRestoreReasons.contains(reason) || reconnectedWhileDimmed.contains($0.recoveryKey)
-        }
-        if !isDimmed, !needsVerification.isEmpty {
-            reconnectedWhileDimmed.removeAll()
+        if !needsVerification.isEmpty {
             scheduleExternalBrightnessRecovery(reason: "after \(reason) restore", displays: needsVerification)
         }
     }
@@ -553,25 +684,28 @@ public final class DimmerController: ObservableObject {
         _ snapshots: [ExternalDisplaySnapshot]
     ) -> (
         resolved: [ExternalDisplaySnapshot],
-        pending: [ExternalDisplaySnapshot],
+        absent: [ExternalDisplaySnapshot],
+        retry: [ExternalDisplaySnapshot],
         errors: [Error]
     ) {
         guard !snapshots.isEmpty else {
-            return ([], [], [])
+            return ([], [], [], [])
         }
 
         let connected: [ExternalDisplayReference]
         do {
             connected = try externalBrightness.discoverDisplays()
+            recordDiscoverySucceeded(connected)
         } catch {
-            return ([], snapshots, [error])
+            recordDiscoveryFailed(error)
+            return ([], [], snapshots, [error])
         }
         let savedByKey = Dictionary(grouping: snapshots) {
             $0.display.recoveryKey
         }
 
         var resolved: [ExternalDisplaySnapshot] = []
-        var pending: [ExternalDisplaySnapshot] = []
+        var absent: [ExternalDisplaySnapshot] = []
         var errors: [Error] = []
         for saved in snapshots {
             let key = saved.display.recoveryKey
@@ -582,13 +716,13 @@ public final class DimmerController: ObservableObject {
             guard savedByKey[key]?.count == 1,
                   matches.count == 1,
                   let connectedDisplay = matches.first else {
-                pending.append(saved)
+                absent.append(saved)
                 errors.append(BrightnessError.readFailed("saved external display \(saved.display.name)"))
                 continue
             }
             resolved.append(ExternalDisplaySnapshot(display: connectedDisplay, luminance: saved.luminance))
         }
-        return (resolved, pending, errors)
+        return (resolved, absent, [], errors)
     }
 
     private func snapshotsUnchangedSinceDim(in original: BrightnessSnapshot) -> BrightnessSnapshot {
@@ -599,11 +733,13 @@ public final class DimmerController: ObservableObject {
         var currentInternalByID: [UInt32: Float] = [:]
         if let current = try? internalBrightness.currentSnapshot() {
             currentInternalByID = Dictionary(
-                uniqueKeysWithValues: current.map { ($0.displayID, $0.brightness) }
+                current.map { ($0.displayID, $0.brightness) },
+                uniquingKeysWith: { first, _ in first }
             )
         }
         let appliedInternalByID = Dictionary(
-            uniqueKeysWithValues: appliedDimSnapshot.internalDisplays.map { ($0.displayID, $0.brightness) }
+            appliedDimSnapshot.internalDisplays.map { ($0.displayID, $0.brightness) },
+            uniquingKeysWith: { first, _ in first }
         )
         let internalDisplays = original.internalDisplays.filter { display in
             guard let applied = appliedInternalByID[display.displayID],
@@ -617,7 +753,9 @@ public final class DimmerController: ObservableObject {
                                               "selected": DiagnosticLogger.encoded(internalDisplays)])
 
         let originalExternalDisplays = original.externalDisplays.map(\.display)
-        let currentExternal = try? externalBrightness.currentSnapshot(for: originalExternalDisplays)
+        let currentExternal = originalExternalDisplays.isEmpty
+            ? []
+            : try? externalBrightness.currentSnapshot(for: originalExternalDisplays)
         let currentExternalByID = (currentExternal ?? []).reduce(into: [String: Int]()) {
             $0[$1.display.recoveryKey] = $1.luminance
         }
@@ -661,22 +799,29 @@ public final class DimmerController: ObservableObject {
     /// Re-sends the saved normal brightness to external displays after a reconnect or wake, then reads it
     /// back. Monitors often accept DDC writes before they are ready, or power on at a default level, so
     /// attempts are repeated with increasing delays until the readback matches or the attempts run out.
+    /// Displays that are still held dim are not touched; they receive the saved level on restore.
     public func scheduleExternalBrightnessRecovery(reason: String, displays: [ExternalDisplayReference]? = nil) {
         let candidates = displays ?? ((try? externalBrightness.discoverDisplays()) ?? [])
         distrustReadings(for: candidates)
-        if isDimmed {
-            reconnectedWhileDimmed.formUnion(candidates.map(\.recoveryKey))
-            trace("recovery.deferred", ["reason": reason, "displays": DiagnosticLogger.encoded(candidates),
+        let held = candidates.filter { isHeldDimmed($0.recoveryKey, display: $0) }
+        if !held.isEmpty {
+            reconnectedWhileDimmed.formUnion(held.map(\.recoveryKey))
+            trace("recovery.deferred", ["reason": reason, "displays": DiagnosticLogger.encoded(held),
                                         "detail": "dimmed; the saved level is sent on restore"])
-            return
         }
-        let keys = Set(candidates.filter { manualExternalLevels[$0.recoveryKey] != nil }.map(\.recoveryKey))
+        let free = candidates.filter { !isHeldDimmed($0.recoveryKey, display: $0) }
+        let keys = Set(free.filter { manualExternalLevels[$0.recoveryKey] != nil }.map(\.recoveryKey))
         guard !keys.isEmpty, !recoveryDelays.isEmpty else {
-            trace("recovery.skipped", ["reason": reason, "displays": DiagnosticLogger.encoded(candidates),
-                                       "detail": "no saved level for these displays"])
+            if !free.isEmpty {
+                trace("recovery.skipped", ["reason": reason, "displays": DiagnosticLogger.encoded(free),
+                                           "detail": "no saved level for these displays"])
+            }
             return
         }
         recoveryGeneration += 1
+        for key in keys {
+            recoveryGenerationByKey[key] = recoveryGeneration
+        }
         trace("recovery.scheduled", ["reason": reason, "keys": keys.sorted(), "delays": recoveryDelays,
                                      "generation": recoveryGeneration])
         scheduleRecoveryAttempt(0, keys: keys, generation: recoveryGeneration, reason: reason)
@@ -688,17 +833,21 @@ public final class DimmerController: ObservableObject {
         }
     }
 
-    private func runRecoveryAttempt(_ attempt: Int, keys: Set<String>, generation: Int, reason: String) {
-        guard generation == recoveryGeneration else { return }
-        guard !isDimmed else {
-            reconnectedWhileDimmed.formUnion(keys)
-            trace("recovery.deferred", ["reason": reason, "attempt": attempt + 1, "keys": keys.sorted(),
-                                        "detail": "dimmed before recovery finished"])
-            return
+    private func finishRecovery(for key: String, generation: Int) {
+        if recoveryGenerationByKey[key] == generation {
+            recoveryGenerationByKey[key] = nil
         }
+    }
+
+    private func runRecoveryAttempt(_ attempt: Int, keys allKeys: Set<String>, generation: Int, reason: String) {
+        // A newer recovery run owns the displays it was scheduled for.
+        let keys = allKeys.filter { recoveryGenerationByKey[$0] == generation }
+        guard !keys.isEmpty else { return }
         if isBusy {
             if attempt + 1 < recoveryDelays.count {
                 scheduleRecoveryAttempt(attempt + 1, keys: keys, generation: generation, reason: reason)
+            } else {
+                keys.forEach { finishRecovery(for: $0, generation: generation) }
             }
             return
         }
@@ -707,7 +856,17 @@ public final class DimmerController: ObservableObject {
         var pending = Set<String>()
         for key in keys.sorted() {
             let matches = connected.filter { $0.recoveryKey == key }
-            guard let level = manualExternalLevels[key] else { continue }
+            if isHeldDimmed(key, display: matches.count == 1 ? matches.first : nil) {
+                reconnectedWhileDimmed.insert(key)
+                finishRecovery(for: key, generation: generation)
+                trace("recovery.deferred", ["reason": reason, "attempt": attempt + 1, "key": key,
+                                            "detail": "dimmed before recovery finished"])
+                continue
+            }
+            guard let level = manualExternalLevels[key] else {
+                finishRecovery(for: key, generation: generation)
+                continue
+            }
             guard matches.count == 1, let display = matches.first else {
                 pending.insert(key)
                 trace("recovery.attempt", ["reason": reason, "attempt": attempt + 1, "key": key,
@@ -724,9 +883,10 @@ public final class DimmerController: ObservableObject {
                 continue
             }
             let readback = (try? externalBrightness.currentSnapshot(for: [display]))?.first { $0.display.recoveryKey == key }
-            if let readback, readback.luminance == level {
+            if let readback, abs(readback.luminance - level) <= Self.readbackTolerance {
                 unreliableReadbackKeys.remove(key)
                 untrustedReadingsUntil[key] = nil
+                finishRecovery(for: key, generation: generation)
                 trace("recovery.attempt", ["reason": reason, "attempt": attempt + 1, "target": DiagnosticLogger.encoded(target),
                                            "readback": readback.luminance, "result": "verified"])
             } else {
@@ -741,7 +901,61 @@ public final class DimmerController: ObservableObject {
         if !pending.isEmpty, attempt + 1 < recoveryDelays.count {
             scheduleRecoveryAttempt(attempt + 1, keys: pending, generation: generation, reason: reason)
         } else {
+            pending.forEach { finishRecovery(for: $0, generation: generation) }
             trace("recovery.finished", ["reason": reason, "attempts": attempt + 1, "unverified": pending.sorted()])
+        }
+    }
+
+    /// Whether the active snapshot still holds this display at a dimmed level (or waiting to be restored).
+    private func isHeldDimmed(_ key: String, display: ExternalDisplayReference?) -> Bool {
+        guard let activeSnapshot else { return false }
+        return activeSnapshot.externalDisplays.contains { saved in
+            saved.display.recoveryKey == key || (display?.matchesRecoveryIdentity(of: saved.display) ?? false)
+        }
+    }
+
+    /// Applies a successful discovery. Returns false when the result is an empty list straight after a
+    /// failed discovery: that is treated as unconfirmed, so saved levels are kept.
+    @discardableResult
+    private func recordDiscoverySucceeded(_ displays: [ExternalDisplayReference]) -> Bool {
+        if displays.isEmpty, lastDiscoveryFailed {
+            trace("displays.discoveryUnconfirmed", ["detail": "empty result right after a failed discovery"])
+            return false
+        }
+        lastDiscoveryFailed = false
+        let connected = Dictionary(grouping: displays, by: \.recoveryKey)
+        manualExternalLevels = manualExternalLevels.filter {
+            connected[$0.key]?.count == 1 || ($0.key.hasPrefix("uuid:") && connected[$0.key] == nil)
+        }
+        return true
+    }
+
+    private func recordDiscoveryFailed(_ error: Error) {
+        lastDiscoveryFailed = true
+        trace("displays.discoveryFailed", ["error": error.localizedDescription])
+    }
+
+    private func loadPersistedSnapshot() -> BrightnessSnapshot? {
+        do {
+            return try snapshotStore.load()
+        } catch {
+            let message = Self.describe(error)
+            persistentError = message
+            lastError = message
+            statusMessage = "Saved dim snapshot was unreadable"
+            trace("snapshot.loadFailed", ["error": message])
+            return nil
+        }
+    }
+
+    private func retryPendingSnapshotClear() {
+        do {
+            try snapshotStore.clear()
+            snapshotClearPending = false
+            trace("snapshot.clearRetried")
+        } catch {
+            report(error)
+            statusMessage = "Restored, but snapshot cleanup failed"
         }
     }
 
@@ -763,8 +977,12 @@ public final class DimmerController: ObservableObject {
         percent > 0 && (canTrustReadings(for: key) || manualExternalLevels[key] == nil)
     }
 
+    private static func describe(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
     private func report(_ error: Error) {
-        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        let message = Self.describe(error)
         lastError = message
         statusMessage = "Needs attention"
         trace("error", ["message": message])
@@ -775,6 +993,7 @@ public final class DimmerController: ObservableObject {
         var entry = fields()
         entry["isDimmed"] = isDimmed
         entry["restoreRequested"] = restoreRequested
+        entry["dormantRestore"] = dormantRestore
         entry["activeSnapshot"] = activeSnapshot.map { DiagnosticLogger.encoded($0) } ?? NSNull()
         entry["appliedDimSnapshot"] = appliedDimSnapshot.map { DiagnosticLogger.encoded($0) } ?? NSNull()
         entry["manualExternalLevels"] = manualExternalLevels

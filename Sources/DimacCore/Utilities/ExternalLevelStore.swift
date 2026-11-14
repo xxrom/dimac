@@ -23,7 +23,8 @@ public final class UserDefaultsExternalLevelStore: ExternalLevelPersisting {
             return [:]
         }
         return stored.reduce(into: [String: Int]()) { result, entry in
-            if let value = entry.value as? Int {
+            // A zero level (stored by older versions) would leave the monitor dark on restore; drop it.
+            if let value = entry.value as? Int, value > 0 {
                 result[entry.key] = min(100, max(0, value))
             }
         }
