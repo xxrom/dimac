@@ -58,11 +58,11 @@ final class AppModel: ObservableObject {
         self.settings = settings
 
         let externalController = M1DDCBrightnessController(
-            executablePathProvider: { settings.m1ddcPath }
+            executablePathProvider: { settings.resolvedM1ddcPath }
         )
         self.externalBrightness = externalController
         self.displayDiscovery = ConnectedDisplayDiscovery(
-            brightnessPathProvider: { settings.brightnessPath }
+            brightnessPathProvider: { settings.resolvedBrightnessPath }
         )
 
         if let dimmer {
@@ -614,12 +614,12 @@ final class AppModel: ObservableObject {
             return FallbackInternalBrightnessController(
                 primary: try DisplayServicesBrightnessController(),
                 fallback: BrightnessCLIBrightnessController(
-                    executablePathProvider: { settings.brightnessPath }
+                    executablePathProvider: { settings.resolvedBrightnessPath }
                 )
             )
         } catch {
             return BrightnessCLIBrightnessController(
-                executablePathProvider: { settings.brightnessPath }
+                executablePathProvider: { settings.resolvedBrightnessPath }
             )
         }
     }
